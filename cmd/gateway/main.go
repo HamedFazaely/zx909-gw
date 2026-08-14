@@ -28,18 +28,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	tbClient, err := mqtt.NewGatewayClient(cfg.ThingsBoard)
-	if err != nil {
-		slog.Error("failed to create ThingsBoard MQTT client", "error", err)
+	// --- Device-protocol focus: use mock MQTT client ---
+	// Swap back to mqtt.NewGatewayClient(cfg.ThingsBoard) when ready for real TB.
+	tbClient := mqtt.NewMockClient()
+	if err := tbClient.Connect(ctx); err != nil {
+		slog.Error("failed to connect MQTT client", "error", err)
 		os.Exit(1)
 	}
 	defer tbClient.Close()
-
-	if err := tbClient.Connect(ctx); err != nil {
-		slog.Error("failed to connect to ThingsBoard", "error", err)
-		os.Exit(1)
-	}
-	slog.Info("connected to ThingsBoard MQTT", "host", cfg.ThingsBoard.Host, "port", cfg.ThingsBoard.Port)
+	slog.Info("using mock MQTT client (protocol-debug mode)")
 
 	srv := server.New(cfg.Server, tbClient)
 	go func() {

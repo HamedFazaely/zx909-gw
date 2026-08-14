@@ -7,11 +7,11 @@ import (
 )
 
 var (
-	ErrIncomplete   = errors.New("incomplete frame")
-	ErrBadHeader    = errors.New("bad header")
-	ErrBadTrailer   = errors.New("bad trailer")
-	ErrBadCRC       = errors.New("CRC mismatch")
-	ErrBadLength    = errors.New("invalid length")
+	ErrIncomplete = errors.New("incomplete frame")
+	ErrBadHeader  = errors.New("bad header")
+	ErrBadTrailer = errors.New("bad trailer")
+	ErrBadCRC     = errors.New("CRC mismatch")
+	ErrBadLength  = errors.New("invalid length")
 )
 
 const (
@@ -77,8 +77,12 @@ func ExtractFrame(buf []byte) (*Frame, int, error) {
 
 	startOfProto := 2 + lengthFieldSize
 	proto := buf[startOfProto]
-	// CRC is calculated over: protocol number + info content + serial
-	crcData := buf[startOfProto : total-4] // up to but not including CRC + trailer
+
+	// Per GT06 doc: CRC covers Packet Length through Serial (inclusive).
+	// That is everything from the length field up to (but not including) the CRC itself.
+	crcStart := 2 // first byte of length field
+	crcEnd := total - 4
+	crcData := buf[crcStart:crcEnd]
 	expectedCRC := binary.BigEndian.Uint16(buf[total-4 : total-2])
 	actualCRC := CRC16X25(crcData)
 	if actualCRC != expectedCRC {
@@ -102,13 +106,14 @@ func ExtractFrame(buf []byte) (*Frame, int, error) {
 
 // BuildACK builds a standard response for login / heartbeat style packets.
 // Format: 78 78 05 PROTO SERIAL_H SERIAL_L CRC_H CRC_L 0D 0A
+// CRC is computed over length + proto + serial (matches PDF example 0xD9DC for serial 0x0001).
 func BuildACK(proto byte, serial uint16) []byte {
 	buf := make([]byte, 10)
 	binary.BigEndian.PutUint16(buf[0:2], HeaderShort)
 	buf[2] = 0x05 // length: proto + serial(2) + crc(2)
 	buf[3] = proto
 	binary.BigEndian.PutUint16(buf[4:6], serial)
-	crc := CRC16X25(buf[3:6])
+	crc := CRC16X25(buf[2:6]) // length through serial
 	binary.BigEndian.PutUint16(buf[6:8], crc)
 	binary.BigEndian.PutUint16(buf[8:10], Trailer)
 	return buf

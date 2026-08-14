@@ -74,12 +74,8 @@ func Load(path string) (*Config, error) {
 		cfg.Logging.Level = "info"
 	}
 
-	if cfg.ThingsBoard.AccessToken == "" || cfg.ThingsBoard.AccessToken == "YOUR_GATEWAY_ACCESS_TOKEN" {
-		return nil, fmt.Errorf("thingsboard.access_token must be set")
-	}
-	if cfg.ThingsBoard.Host == "" {
-		return nil, fmt.Errorf("thingsboard.host must be set")
-	}
+	// ThingsBoard credentials are only required when using the real MQTT client.
+	// While developing the device protocol side with the mock they can be left empty.
 
 	return &cfg, nil
 }

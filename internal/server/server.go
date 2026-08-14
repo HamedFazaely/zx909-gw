@@ -12,10 +12,11 @@ import (
 	"github.com/HamedFazaely/zx909-gw/internal/protocol"
 )
 
-// Server accepts tracker TCP connections and forwards data to ThingsBoard.
+// Server accepts tracker TCP connections and forwards data to ThingsBoard
+// (or a mock) via the mqtt.Client interface.
 type Server struct {
 	cfg      config.ServerConfig
-	tb       *mqtt.GatewayClient
+	tb       mqtt.Client
 	ln       net.Listener
 	mu       sync.Mutex
 	sessions map[string]*Session // imei -> session
@@ -24,14 +25,14 @@ type Server struct {
 }
 
 type Session struct {
-	IMEI       string
-	Conn       net.Conn
-	Connected  time.Time
-	LastSeen   time.Time
-	mu         sync.Mutex
+	IMEI      string
+	Conn      net.Conn
+	Connected time.Time
+	LastSeen  time.Time
+	mu        sync.Mutex
 }
 
-func New(cfg config.ServerConfig, tb *mqtt.GatewayClient) *Server {
+func New(cfg config.ServerConfig, tb mqtt.Client) *Server {
 	return &Server{
 		cfg:      cfg,
 		tb:       tb,
@@ -132,7 +133,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				ack := protocol.BuildACK(protocol.MsgLogin, frame.Serial)
 				_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 				_, _ = conn.Write(ack)
-				slog.Info("login ok", "imei", imei, "remote", remote)
+				slog.Info("login ok", "imei", imei, "serial", frame.Serial, "remote", remote)
 
 			case protocol.MsgStatus:
 				// Heartbeat / status – just ACK
@@ -142,6 +143,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				ack := protocol.BuildACK(protocol.MsgStatus, frame.Serial)
 				_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 				_, _ = conn.Write(ack)
+				slog.Debug("heartbeat ACK", "imei", imei, "serial", frame.Serial, "remote", remote)
 
 			case protocol.MsgGPS, protocol.MsgGPSLBS, protocol.MsgGPS2, protocol.MsgGPSOffline:
 				if imei == "" {
@@ -153,7 +155,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				}
 				pos, err := protocol.ParseGPS(frame.Body)
 				if err != nil {
-					slog.Debug("GPS parse failed", "imei", imei, "error", err, "body_len", len(frame.Body))
+					slog.Debug("GPS parse failed", "imei", imei, "error", err, "body_len", len(frame.Body), "proto", frame.Proto)
 					// Still ACK so the device does not spam
 				} else {
 					values := map[string]any{
@@ -172,7 +174,8 @@ func (s *Server) handleConn(conn net.Conn) {
 						slog.Warn("publish telemetry failed", "imei", imei, "error", err)
 					} else {
 						slog.Info("telemetry", "imei", imei,
-							"lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh)
+							"lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh,
+							"sats", pos.Satellites, "valid", pos.Valid)
 					}
 				}
 				// Many firmwares expect an ACK for GPS packets as well
@@ -181,7 +184,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				_, _ = conn.Write(ack)
 
 			default:
-				slog.Debug("unhandled proto", "proto", frame.Proto, "imei", imei, "remote", remote)
+				slog.Debug("unhandled proto", "proto", frame.Proto, "imei", imei, "serial", frame.Serial, "remote", remote, "body_len", len(frame.Body))
 				// Best-effort ACK for unknown types that look like they need one
 				ack := protocol.BuildACK(frame.Proto, frame.Serial)
 				_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
