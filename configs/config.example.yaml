@@ -15,7 +15,7 @@ server:
   # real protocol conversation. Our own ACKs are suppressed in this mode
   # so the device only talks to the vendor. Turn off once protocol is known.
   vendor_forward:
-    enabled: false
+    enabled: true
     host: "www.365gps.com"
     port: 8002
 
