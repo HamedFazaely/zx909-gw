@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net"
@@ -92,10 +93,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			s.removeSession(imei, sess)
 			_ = s.tb.DisconnectDevice(imei)
 			slog.Info("tracker disconnected", "imei", imei, "remote", remote)
+		} else {
+			slog.Info("tracker disconnected (no login)", "remote", remote)
 		}
 	}()
 
-	tmp := make([]byte, 2048)
+	tmp := make([]byte, 4096)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
 		n, err := conn.Read(tmp)
@@ -105,6 +108,10 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			return
 		}
+
+		// Always log the raw bytes we just received — critical while reverse-engineering
+		slog.Info("recv", "remote", remote, "n", n, "hex", hex.EncodeToString(tmp[:n]))
+
 		buf = append(buf, tmp[:n]...)
 
 		for {
@@ -113,37 +120,60 @@ func (s *Server) handleConn(conn net.Conn) {
 				break
 			}
 			if err != nil {
-				// Resync: drop one byte and try again
-				slog.Debug("frame error, resync", "error", err, "remote", remote)
-				buf = buf[1:]
+				slog.Warn("frame error, resync",
+					"error", err,
+					"remote", remote,
+					"buf_hex", hex.EncodeToString(buf),
+					"consumed", consumed,
+				)
+				if consumed > 0 && consumed <= len(buf) {
+					buf = buf[consumed:]
+				} else if len(buf) > 0 {
+					buf = buf[1:]
+				}
 				continue
 			}
 			buf = buf[consumed:]
+
+			slog.Info("frame",
+				"remote", remote,
+				"imei", imei,
+				"proto", frame.Proto,
+				"body_len", len(frame.Body),
+				"raw", frame.Hex(),
+			)
 
 			switch frame.Proto {
 			case protocol.MsgLogin:
 				id, err := protocol.ParseLogin(frame.Body)
 				if err != nil {
-					slog.Warn("login parse failed", "error", err, "remote", remote)
+					slog.Warn("login parse failed", "error", err, "remote", remote, "body", hex.EncodeToString(frame.Body))
+					// Still send the short ACK the vendor uses so the device stays calm
+					ack := protocol.BuildLoginACK()
+					_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
+					_, _ = conn.Write(ack)
+					slog.Info("sent login ACK (parse failed)", "remote", remote, "ack", hex.EncodeToString(ack))
 					continue
 				}
 				imei = id
 				sess = s.registerSession(imei, conn)
 				_ = s.tb.ConnectDevice(imei)
-				ack := protocol.BuildACK(protocol.MsgLogin, frame.Serial)
+
+				// ZX909_EU expects the short vendor-style ACK, not classic GT06
+				ack := protocol.BuildLoginACK()
 				_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 				_, _ = conn.Write(ack)
-				slog.Info("login ok", "imei", imei, "serial", frame.Serial, "remote", remote)
+				slog.Info("login ok", "imei", imei, "remote", remote, "ack", hex.EncodeToString(ack))
 
 			case protocol.MsgStatus:
-				// Heartbeat / status – just ACK
 				if sess != nil {
 					sess.touch()
 				}
-				ack := protocol.BuildACK(protocol.MsgStatus, frame.Serial)
+				// Echo-style / simple ACK — vendor often mirrors or uses short form
+				ack := protocol.BuildSimpleACK(protocol.MsgStatus)
 				_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 				_, _ = conn.Write(ack)
-				slog.Debug("heartbeat ACK", "imei", imei, "serial", frame.Serial, "remote", remote)
+				slog.Debug("status/heartbeat ACK", "imei", imei, "remote", remote)
 
 			case protocol.MsgGPS, protocol.MsgGPSLBS, protocol.MsgGPS2, protocol.MsgGPSOffline:
 				if imei == "" {
@@ -155,8 +185,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				}
 				pos, err := protocol.ParseGPS(frame.Body)
 				if err != nil {
-					slog.Debug("GPS parse failed", "imei", imei, "error", err, "body_len", len(frame.Body), "proto", frame.Proto)
-					// Still ACK so the device does not spam
+					slog.Debug("GPS parse failed", "imei", imei, "error", err, "body_len", len(frame.Body), "proto", frame.Proto, "body", hex.EncodeToString(frame.Body))
 				} else {
 					values := map[string]any{
 						"latitude":   pos.Latitude,
@@ -178,15 +207,25 @@ func (s *Server) handleConn(conn net.Conn) {
 							"sats", pos.Satellites, "valid", pos.Valid)
 					}
 				}
-				// Many firmwares expect an ACK for GPS packets as well
-				ack := protocol.BuildACK(frame.Proto, frame.Serial)
+				ack := protocol.BuildSimpleACK(frame.Proto)
 				_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 				_, _ = conn.Write(ack)
 
 			default:
-				slog.Debug("unhandled proto", "proto", frame.Proto, "imei", imei, "serial", frame.Serial, "remote", remote, "body_len", len(frame.Body))
-				// Best-effort ACK for unknown types that look like they need one
-				ack := protocol.BuildACK(frame.Proto, frame.Serial)
+				// Unknown / Topin-specific (0x1A, 0x30, 0x57, 0xB3, 0x34, 0x64, …)
+				// Log and send a minimal ACK so the device does not reconnect.
+				if sess != nil {
+					sess.touch()
+				}
+				slog.Info("unhandled proto — ACKing",
+					"proto", frame.Proto,
+					"imei", imei,
+					"remote", remote,
+					"body_len", len(frame.Body),
+					"body", hex.EncodeToString(frame.Body),
+					"raw", frame.Hex(),
+				)
+				ack := protocol.BuildSimpleACK(frame.Proto)
 				_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 				_, _ = conn.Write(ack)
 			}
