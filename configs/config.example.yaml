@@ -1,0 +1,28 @@
+# ZX909 Gateway configuration
+# Copy to config.yaml and fill in real values.
+
+server:
+  # TCP listen address for trackers (the port you set via SMS)
+  listen: ":8002"
+  # Read timeout for idle connections (trackers send heartbeats)
+  read_timeout: 5m
+  # Write timeout for ACKs
+  write_timeout: 10s
+
+thingsboard:
+  # MQTT broker of your ThingsBoard instance
+  host: "localhost"
+  port: 1883
+  # Access token of the *gateway* device (Is gateway = true)
+  access_token: "YOUR_GATEWAY_ACCESS_TOKEN"
+  # Optional client ID
+  client_id: "zx909-gw-1"
+  # Device profile name used when auto-creating child devices
+  device_profile: "pet-tracker"
+  # QoS for telemetry
+  qos: 1
+  # Keepalive
+  keepalive: 30s
+
+logging:
+  level: info   # debug | info | warn | error
