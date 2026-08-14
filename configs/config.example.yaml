@@ -9,6 +9,16 @@ server:
   # Write timeout for ACKs
   write_timeout: 10s
 
+  # Optional vendor shadow / MITM mode (DEBUG ONLY).
+  # When enabled the gateway also connects to the official 365gps server,
+  # forwards traffic both ways, and logs every byte so we can learn the
+  # real protocol conversation. Our own ACKs are suppressed in this mode
+  # so the device only talks to the vendor. Turn off once protocol is known.
+  vendor_forward:
+    enabled: false
+    host: "www.365gps.com"
+    port: 8002
+
 thingsboard:
   # MQTT broker of your ThingsBoard instance
   host: "localhost"
