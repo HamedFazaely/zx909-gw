@@ -11,6 +11,14 @@ import (
 	"github.com/HamedFazaely/zx909-gw/internal/config"
 )
 
+type Client interface {
+	Connect(ctx context.Context) error
+	Close()
+	ConnectDevice(deviceName string) error
+	DisconnectDevice(deviceName string) error 
+	PublishTelemetry(deviceName string, ts time.Time, values map[string]any) error
+}
+
 // GatewayClient talks to ThingsBoard using the MQTT Gateway API.
 type GatewayClient struct {
 	cfg    config.ThingsBoardConfig
