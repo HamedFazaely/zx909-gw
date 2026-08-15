@@ -17,15 +17,14 @@ import (
 // Server accepts tracker TCP connections and forwards data to ThingsBoard
 // (or a mock) via the mqtt.Client interface.
 //
-// When VendorForward is enabled it also opens a connection to the official
-// vendor server and proxies traffic both ways so we can observe the real
-// conversation while still parsing frames and publishing to the mock MQTT.
+// When VendorForward is enabled it also proxies to the official vendor so we
+// can compare our ACKs with theirs while validating the protocol.
 type Server struct {
 	cfg      config.ServerConfig
 	tb       mqtt.Client
 	ln       net.Listener
 	mu       sync.Mutex
-	sessions map[string]*Session // imei -> session
+	sessions map[string]*Session
 	wg       sync.WaitGroup
 	closing  bool
 }
@@ -128,8 +127,6 @@ func (s *Server) handleConnStandalone(conn net.Conn, remote string) {
 			}
 			return
 		}
-
-		slog.Info("recv", "remote", remote, "n", n, "hex", hex.EncodeToString(tmp[:n]))
 		buf = append(buf, tmp[:n]...)
 		buf = s.drainFrames(conn, remote, buf, &imei, &sess, true)
 	}
@@ -188,8 +185,6 @@ func (s *Server) handleConnWithVendor(deviceConn net.Conn, remote string) {
 			}
 
 			chunk := tmp[:n]
-			slog.Info("C2S", "remote", remote, "n", n, "hex", hex.EncodeToString(chunk))
-
 			_ = vendorConn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 			if _, err := vendorConn.Write(chunk); err != nil {
 				slog.Debug("vendor write error", "remote", remote, "error", err)
@@ -258,7 +253,7 @@ func (s *Server) drainFrames(conn net.Conn, remote string, buf []byte, imei *str
 		slog.Info("frame",
 			"remote", remote,
 			"imei", *imei,
-			"proto", frame.Proto,
+			"proto", protocol.ProtoHex(frame.Proto),
 			"body_len", len(frame.Body),
 			"raw", frame.Hex(),
 		)
@@ -268,6 +263,21 @@ func (s *Server) drainFrames(conn net.Conn, remote string, buf []byte, imei *str
 	return buf
 }
 
+func (s *Server) writeACK(conn net.Conn, remote, imei string, proto byte, ack []byte) {
+	_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
+	_, err := conn.Write(ack)
+	if err != nil {
+		slog.Warn("ACK write failed", "remote", remote, "imei", imei, "proto", protocol.ProtoHex(proto), "error", err)
+		return
+	}
+	slog.Info("ACK",
+		"remote", remote,
+		"imei", imei,
+		"proto", protocol.ProtoHex(proto),
+		"hex", hex.EncodeToString(ack),
+	)
+}
+
 func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame, imei *string, sess **Session, sendACKs bool) {
 	switch frame.Proto {
 	case protocol.MsgLogin:
@@ -275,22 +285,16 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 		if err != nil {
 			slog.Warn("login parse failed", "error", err, "remote", remote, "body", hex.EncodeToString(frame.Body))
 			if sendACKs {
-				ack := protocol.BuildLoginACK()
-				_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
-				_, _ = conn.Write(ack)
-				slog.Info("sent login ACK (parse failed)", "remote", remote, "ack", hex.EncodeToString(ack))
+				s.writeACK(conn, remote, "", protocol.MsgLogin, protocol.BuildLoginACK())
 			}
 			return
 		}
 		*imei = id
 		*sess = s.registerSession(id, conn)
 		_ = s.tb.ConnectDevice(id)
-		slog.Info("login ok", "imei", id, "remote", remote, "send_ack", sendACKs)
+		slog.Info("login ok", "imei", id, "remote", remote)
 		if sendACKs {
-			ack := protocol.BuildLoginACK()
-			_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
-			_, _ = conn.Write(ack)
-			slog.Info("sent login ACK", "imei", id, "ack", hex.EncodeToString(ack))
+			s.writeACK(conn, remote, id, protocol.MsgLogin, protocol.BuildLoginACK())
 		}
 
 	case protocol.MsgStatus:
@@ -310,9 +314,7 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 			}
 		}
 		if sendACKs {
-			ack := protocol.BuildSimpleACK(protocol.MsgStatus)
-			_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
-			_, _ = conn.Write(ack)
+			s.writeACK(conn, remote, *imei, protocol.MsgStatus, protocol.BuildStatusEcho(frame.Raw))
 		}
 
 	case protocol.MsgGPS, protocol.MsgGPSLBS, protocol.MsgGPS2, protocol.MsgGPSOffline:
@@ -326,7 +328,7 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 		pos, err := protocol.ParseGPS(frame.Body)
 		if err != nil {
 			slog.Debug("GPS parse failed", "imei", *imei, "error", err,
-				"body_len", len(frame.Body), "proto", frame.Proto, "body", hex.EncodeToString(frame.Body))
+				"body_len", len(frame.Body), "proto", protocol.ProtoHex(frame.Proto), "body", hex.EncodeToString(frame.Body))
 		} else {
 			values := map[string]any{
 				"latitude":   pos.Latitude,
@@ -349,21 +351,20 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 			}
 		}
 		if sendACKs {
-			ack := protocol.BuildSimpleACK(frame.Proto)
-			_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
-			_, _ = conn.Write(ack)
+			dt := protocol.DatetimeFromBody(frame.Body)
+			s.writeACK(conn, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt))
 		}
 
-	case protocol.MsgWifiLBS, protocol.MsgWifiLBS2:
+	case protocol.MsgWifiLBS, protocol.MsgWifiLBS2, protocol.MsgOfflineWifi, protocol.MsgOnlineWifi:
 		if *sess != nil {
 			(*sess).touch()
 		}
 		wl, err := protocol.ParseWifiLBS(frame.Body)
 		if err != nil {
 			slog.Debug("wifi/lbs parse failed", "imei", *imei, "error", err,
-				"proto", frame.Proto, "body", hex.EncodeToString(frame.Body))
+				"proto", protocol.ProtoHex(frame.Proto), "body", hex.EncodeToString(frame.Body))
 		} else {
-			slog.Info("wifi/lbs", "imei", *imei, "proto", frame.Proto, "summary", wl.String(),
+			slog.Info("wifi/lbs", "imei", *imei, "proto", protocol.ProtoHex(frame.Proto), "summary", wl.String(),
 				"wifi_count", len(wl.Wifi), "cell_count", len(wl.Cells))
 			if *imei != "" {
 				values := map[string]any{
@@ -386,29 +387,22 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 			}
 		}
 		if sendACKs {
-			ack := protocol.BuildSimpleACK(frame.Proto)
-			_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
-			_, _ = conn.Write(ack)
+			dt := protocol.DatetimeFromBody(frame.Body)
+			s.writeACK(conn, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt))
 		}
 
 	default:
 		if *sess != nil {
 			(*sess).touch()
 		}
-		slog.Info("unhandled proto",
-			"proto", frame.Proto,
+		slog.Info("unhandled",
+			"proto", protocol.ProtoHex(frame.Proto),
 			"imei", *imei,
 			"remote", remote,
 			"body_len", len(frame.Body),
 			"body", hex.EncodeToString(frame.Body),
 			"raw", frame.Hex(),
-			"send_ack", sendACKs,
 		)
-		if sendACKs {
-			ack := protocol.BuildSimpleACK(frame.Proto)
-			_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
-			_, _ = conn.Write(ack)
-		}
 	}
 }
 
