@@ -15,20 +15,12 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen        string              `yaml:"listen"`
-	ReadTimeout   time.Duration       `yaml:"read_timeout"`
-	WriteTimeout  time.Duration       `yaml:"write_timeout"`
-	VendorForward VendorForwardConfig `yaml:"vendor_forward"`
-}
-
-// VendorForwardConfig enables a temporary MITM/shadow mode.
-// When enabled the gateway also connects to the official vendor server,
-// forwards traffic both ways, and logs everything so we can learn the
-// real conversation. Disable once the protocol is fully understood.
-type VendorForwardConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Host    string `yaml:"host"`
-	Port    int    `yaml:"port"`
+	Listen       string        `yaml:"listen"`
+	ReadTimeout  time.Duration `yaml:"read_timeout"`
+	WriteTimeout time.Duration `yaml:"write_timeout"`
+	// DebugAPI is an optional HTTP bind address for the command injector
+	// (e.g. "127.0.0.1:8090"). Empty disables it.
+	DebugAPI string `yaml:"debug_api"`
 }
 
 type ThingsBoardConfig struct {
@@ -56,7 +48,6 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// Defaults
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8002"
 	}
@@ -65,14 +56,6 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.WriteTimeout == 0 {
 		cfg.Server.WriteTimeout = 10 * time.Second
-	}
-	if cfg.Server.VendorForward.Enabled {
-		if cfg.Server.VendorForward.Host == "" {
-			cfg.Server.VendorForward.Host = "www.365gps.com"
-		}
-		if cfg.Server.VendorForward.Port == 0 {
-			cfg.Server.VendorForward.Port = 8002
-		}
 	}
 	if cfg.ThingsBoard.Port == 0 {
 		cfg.ThingsBoard.Port = 1883
@@ -92,9 +75,6 @@ func Load(path string) (*Config, error) {
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
 	}
-
-	// ThingsBoard credentials are only required when using the real MQTT client.
-	// While developing the device protocol side with the mock they can be left empty.
 
 	return &cfg, nil
 }

@@ -14,38 +14,40 @@ import (
 )
 
 func main() {
-	cfgPath := flag.String("config", "config.yaml", "path to configuration file")
+	cfgPath := flag.String("config", "configs/config.example.yaml", "path to config YAML")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		slog.Error("failed to load config", "error", err)
+		slog.Error("config load failed", "error", err)
 		os.Exit(1)
 	}
-
 	setupLogging(cfg.Logging.Level)
+
+	// Protocol work: always use mock MQTT for now.
+	tb := mqtt.NewMockClient()
+	slog.Info("using mock MQTT client (device-protocol focus)")
+
+	srv := server.New(cfg.Server, tb)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// --- Device-protocol focus: use mock MQTT client ---
-	// Swap back to mqtt.NewGatewayClient(cfg.ThingsBoard) when ready for real TB.
-	tbClient := mqtt.NewMockClient()
-	if err := tbClient.Connect(ctx); err != nil {
-		slog.Error("failed to connect MQTT client", "error", err)
-		os.Exit(1)
+	if cfg.Server.DebugAPI != "" {
+		go func() {
+			if err := server.ListenAndServeDebug(cfg.Server.DebugAPI, srv); err != nil {
+				slog.Error("debug API stopped", "error", err)
+			}
+		}()
 	}
-	defer tbClient.Close()
-	slog.Info("using mock MQTT client (protocol-debug mode)")
 
-	srv := server.New(cfg.Server, tbClient)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
 			slog.Error("TCP server stopped", "error", err)
 			stop()
 		}
 	}()
-	slog.Info("TCP server listening", "addr", cfg.Server.Listen)
+	slog.Info("gateway running", "tcp", cfg.Server.Listen, "debug_api", cfg.Server.DebugAPI)
 
 	<-ctx.Done()
 	slog.Info("shutting down…")
