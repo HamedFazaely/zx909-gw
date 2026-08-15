@@ -185,3 +185,21 @@ func TestParseWifiLBSFromCapture(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildDatetimeACK(t *testing.T) {
+	dt := []byte{0x1a, 0x08, 0x0f, 0x02, 0x11, 0x17}
+	ack := BuildDatetimeACK(0x10, dt)
+	got := hex.EncodeToString(ack)
+	want := "787800101a080f0211170d0a"
+	if got != want {
+		t.Fatalf("BuildDatetimeACK = %s, want %s", got, want)
+	}
+}
+
+func TestBuildStatusEcho(t *testing.T) {
+	raw, _ := hex.DecodeString("787807131409032c5f0d0a")
+	ack := BuildStatusEcho(raw)
+	if hex.EncodeToString(ack) != hex.EncodeToString(raw) {
+		t.Fatalf("echo mismatch: %s", hex.EncodeToString(ack))
+	}
+}
