@@ -354,6 +354,43 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 			_, _ = conn.Write(ack)
 		}
 
+	case protocol.MsgWifiLBS, protocol.MsgWifiLBS2:
+		if *sess != nil {
+			(*sess).touch()
+		}
+		wl, err := protocol.ParseWifiLBS(frame.Body)
+		if err != nil {
+			slog.Debug("wifi/lbs parse failed", "imei", *imei, "error", err,
+				"proto", frame.Proto, "body", hex.EncodeToString(frame.Body))
+		} else {
+			slog.Info("wifi/lbs", "imei", *imei, "proto", frame.Proto, "summary", wl.String(),
+				"wifi_count", len(wl.Wifi), "cell_count", len(wl.Cells))
+			if *imei != "" {
+				values := map[string]any{
+					"lbs_wifi_count": len(wl.Wifi),
+					"lbs_cell_count": len(wl.Cells),
+					"position_type":  "lbs_wifi",
+				}
+				if len(wl.Cells) > 0 {
+					c := wl.Cells[0]
+					values["mcc"] = c.MCC
+					values["mnc"] = c.MNC
+					values["lac"] = c.LAC
+					values["cell_id"] = c.CellID
+				}
+				ts := wl.Time
+				if ts.IsZero() {
+					ts = time.Now().UTC()
+				}
+				_ = s.tb.PublishTelemetry(*imei, ts, values)
+			}
+		}
+		if sendACKs {
+			ack := protocol.BuildSimpleACK(frame.Proto)
+			_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
+			_, _ = conn.Write(ack)
+		}
+
 	default:
 		if *sess != nil {
 			(*sess).touch()
