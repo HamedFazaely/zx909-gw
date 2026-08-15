@@ -101,10 +101,6 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.handleConnStandalone(conn, remote)
 }
 
-// ---------------------------------------------------------------------------
-// Standalone mode — we own the conversation and send ACKs ourselves.
-// ---------------------------------------------------------------------------
-
 func (s *Server) handleConnStandalone(conn net.Conn, remote string) {
 	var (
 		buf  []byte
@@ -135,13 +131,9 @@ func (s *Server) handleConnStandalone(conn net.Conn, remote string) {
 
 		slog.Info("recv", "remote", remote, "n", n, "hex", hex.EncodeToString(tmp[:n]))
 		buf = append(buf, tmp[:n]...)
-		buf = s.drainFrames(conn, remote, buf, &imei, &sess, true /* sendACKs */)
+		buf = s.drainFrames(conn, remote, buf, &imei, &sess, true)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Vendor-forward mode — bidirectional proxy + passive parse/log.
-// ---------------------------------------------------------------------------
 
 func (s *Server) handleConnWithVendor(deviceConn net.Conn, remote string) {
 	vendorAddr := net.JoinHostPort(s.cfg.VendorForward.Host, fmt.Sprintf("%d", s.cfg.VendorForward.Port))
@@ -158,7 +150,7 @@ func (s *Server) handleConnWithVendor(deviceConn net.Conn, remote string) {
 	var (
 		imei string
 		sess *Session
-		mu   sync.Mutex // protects imei/sess across the two directions
+		mu   sync.Mutex
 	)
 
 	defer func() {
@@ -178,7 +170,6 @@ func (s *Server) handleConnWithVendor(deviceConn net.Conn, remote string) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Device → Vendor (+ parse)
 	go func() {
 		defer wg.Done()
 		defer vendorConn.Close()
@@ -199,22 +190,19 @@ func (s *Server) handleConnWithVendor(deviceConn net.Conn, remote string) {
 			chunk := tmp[:n]
 			slog.Info("C2S", "remote", remote, "n", n, "hex", hex.EncodeToString(chunk))
 
-			// Forward to vendor first so latency stays low
 			_ = vendorConn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 			if _, err := vendorConn.Write(chunk); err != nil {
 				slog.Debug("vendor write error", "remote", remote, "error", err)
 				return
 			}
 
-			// Parse on our side (no ACKs — vendor owns the conversation)
 			buf = append(buf, chunk...)
 			mu.Lock()
-			buf = s.drainFrames(deviceConn, remote, buf, &imei, &sess, false /* sendACKs */)
+			buf = s.drainFrames(deviceConn, remote, buf, &imei, &sess, false)
 			mu.Unlock()
 		}
 	}()
 
-	// Vendor → Device (log + forward)
 	go func() {
 		defer wg.Done()
 		defer vendorConn.Close()
@@ -245,8 +233,6 @@ func (s *Server) handleConnWithVendor(deviceConn net.Conn, remote string) {
 	wg.Wait()
 }
 
-// drainFrames extracts and handles complete frames from buf.
-// sendACKs controls whether we reply to the device (false in vendor-forward mode).
 func (s *Server) drainFrames(conn net.Conn, remote string, buf []byte, imei *string, sess **Session, sendACKs bool) []byte {
 	for {
 		frame, consumed, err := protocol.ExtractFrame(buf)
@@ -311,7 +297,18 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 		if *sess != nil {
 			(*sess).touch()
 		}
-		slog.Debug("status/heartbeat", "imei", *imei, "remote", remote, "body", hex.EncodeToString(frame.Body))
+		st, err := protocol.ParseStatus(frame.Body)
+		if err != nil {
+			slog.Debug("status parse failed", "imei", *imei, "error", err, "body", hex.EncodeToString(frame.Body))
+		} else {
+			slog.Info("status", "imei", *imei, "summary", st.String(),
+				"battery", st.BatteryPercent, "sw", st.SoftwareVer, "tz", st.Timezone)
+			if *imei != "" && st.BatteryPercent >= 0 {
+				_ = s.tb.PublishTelemetry(*imei, time.Now().UTC(), map[string]any{
+					"battery": st.BatteryPercent,
+				})
+			}
+		}
 		if sendACKs {
 			ack := protocol.BuildSimpleACK(protocol.MsgStatus)
 			_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
@@ -346,9 +343,9 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 			if err := s.tb.PublishTelemetry(*imei, ts, values); err != nil {
 				slog.Warn("publish telemetry failed", "imei", *imei, "error", err)
 			} else {
-				slog.Info("telemetry", "imei", *imei,
+				slog.Info("gps", "imei", *imei, "summary", pos.String(),
 					"lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh,
-					"sats", pos.Satellites, "valid", pos.Valid)
+					"course", pos.Course, "sats", pos.Satellites, "valid", pos.Valid)
 			}
 		}
 		if sendACKs {
