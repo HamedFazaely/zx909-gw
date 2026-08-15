@@ -128,3 +128,60 @@ func TestParseStatusShort(t *testing.T) {
 	}
 	t.Log(st.String())
 }
+
+func TestParseWifiLBSFromCapture(t *testing.T) {
+	cases := []struct {
+		name      string
+		bodyHex   string
+		wifiCount int
+		cellCount int
+		wantMCC   int
+	}{
+		{
+			name:      "1a lbs only",
+			bodyHex:   "2608150020480301b00b0000b09f01670903300000b09f01670903300000b09f016709033000",
+			wifiCount: 0,
+			cellCount: 3,
+			wantMCC:   432,
+		},
+		{
+			name:      "1a with 3 wifi",
+			bodyHex:   "2608150125292479ef30f1303630a220cddd7c506c7220a50914570301b00b0000b09f016709032e0000b09f016709032e0000b09f016709032e00",
+			wifiCount: 3,
+			cellCount: 3,
+			wantMCC:   432,
+		},
+		{
+			name:      "1b with 4 wifi",
+			bodyHex:   "2608150123462479ef30f1303230a220cddd7c506c7220a5091457c04a00c34fcd590301b00b0000b09f01670903320000b09f01670903320000b09f016709033200",
+			wifiCount: 4,
+			cellCount: 3,
+			wantMCC:   432,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := hex.DecodeString(tc.bodyHex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wl, err := ParseWifiLBS(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(wl.Wifi) != tc.wifiCount {
+				t.Fatalf("wifi=%d want %d; summary=%s", len(wl.Wifi), tc.wifiCount, wl.String())
+			}
+			if len(wl.Cells) != tc.cellCount {
+				t.Fatalf("cells=%d want %d; summary=%s", len(wl.Cells), tc.cellCount, wl.String())
+			}
+			if tc.cellCount > 0 && wl.Cells[0].MCC != tc.wantMCC {
+				t.Fatalf("MCC=%d want %d", wl.Cells[0].MCC, tc.wantMCC)
+			}
+			if wl.Time.Year() != 2026 {
+				t.Fatalf("year=%d want 2026 (time=%s)", wl.Time.Year(), wl.Time)
+			}
+			t.Log(wl.String())
+		})
+	}
+}
