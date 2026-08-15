@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/hex"
 	"testing"
+	"time"
 )
 
 func TestBuildACKMatchesPDFExample(t *testing.T) {
@@ -201,5 +202,43 @@ func TestBuildStatusEcho(t *testing.T) {
 	ack := BuildStatusEcho(raw)
 	if hex.EncodeToString(ack) != hex.EncodeToString(raw) {
 		t.Fatalf("echo mismatch: %s", hex.EncodeToString(ack))
+	}
+}
+
+func TestBuildTimeSyncReply(t *testing.T) {
+	ts := time.Date(2026, 8, 15, 21, 18, 29, 0, time.UTC)
+	ack := BuildTimeSyncReply(ts)
+	got := hex.EncodeToString(ack)
+	want := "7878073007ea080f15121d0d0a"
+	if got != want {
+		t.Fatalf("BuildTimeSyncReply = %s, want %s", got, want)
+	}
+}
+
+func TestBuildRestartShutdown(t *testing.T) {
+	if hex.EncodeToString(BuildRestart()) != "78780248010d0a" {
+		t.Fatal(hex.EncodeToString(BuildRestart()))
+	}
+	if hex.EncodeToString(BuildShutdown()) != "78780248020d0a" {
+		t.Fatal(hex.EncodeToString(BuildShutdown()))
+	}
+}
+
+func TestBuildUploadInterval(t *testing.T) {
+	got := hex.EncodeToString(BuildUploadInterval(180))
+	want := "7878039700b40d0a"
+	if got != want {
+		t.Fatalf("%s want %s", got, want)
+	}
+}
+
+func TestParseICCID(t *testing.T) {
+	body, _ := hex.DecodeString("3839393831313239303030313339353736313934")
+	id, err := ParseICCID(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "89981129000139576194" {
+		t.Fatalf("iccid=%s", id)
 	}
 }
