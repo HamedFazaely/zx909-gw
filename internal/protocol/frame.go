@@ -29,7 +29,8 @@ const (
 	MsgGPSLBS     byte = 0x12
 	MsgStatus     byte = 0x13
 	MsgGPS2       byte = 0x22
-	MsgWifiLBS    byte = 0x1A // observed on ZX909_EU
+	MsgWifiLBS    byte = 0x1A // observed on ZX909_EU (Wi-Fi + LBS)
+	MsgWifiLBS2   byte = 0x1B // observed on ZX909_EU (Wi-Fi + LBS, variant)
 	MsgTimeSync   byte = 0x30 // observed
 	MsgParam      byte = 0x57 // observed
 	MsgICCID      byte = 0xB3 // observed
