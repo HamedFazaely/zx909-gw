@@ -67,11 +67,11 @@ func BuildUploadInterval(seconds uint16) []byte {
 }
 
 // BuildStatusInterval sets status packet interval via 0x13 (minutes).
-func BuildStatusInterval(minutes byte) []byte {
+func BuildStatusInterval(minutes int) []byte {
 	if minutes == 0 {
 		minutes = 1
 	}
-	return []byte{0x78, 0x78, 0x02, MsgStatus, minutes, 0x0D, 0x0A}
+	return []byte{0x78, 0x78, 0x02, MsgStatus, byte(minutes), 0x0D, 0x0A}
 }
 
 // BuildLocate requests an immediate position upload (0x80).

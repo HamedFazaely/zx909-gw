@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HamedFazaely/zx909-gw/internal/command"
 	"github.com/HamedFazaely/zx909-gw/internal/protocol"
 )
 
@@ -14,11 +15,12 @@ import (
 // commands while reverse-engineering the device protocol. Not for production
 // exposure without auth.
 type DebugAPI struct {
-	srv *Server
+	srv     *Server
+	handler *command.Handler
 }
 
 func NewDebugAPI(srv *Server) *DebugAPI {
-	return &DebugAPI{srv: srv}
+	return &DebugAPI{srv: srv, handler: command.NewHandler(srv, &slog.Logger{})}
 }
 
 func (d *DebugAPI) Handler() http.Handler {
@@ -40,7 +42,7 @@ func (d *DebugAPI) listDevices(w http.ResponseWriter, r *http.Request) {
 
 func (d *DebugAPI) reboot(w http.ResponseWriter, r *http.Request) {
 	imei := r.PathValue("imei")
-	if err := d.srv.SendToDevice(imei, protocol.BuildRestart(), protocol.MsgRestart, "CMD"); err != nil {
+	if err := d.handler.ExecuteRPC(r.Context(), imei, "reboot", nil); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
@@ -49,7 +51,7 @@ func (d *DebugAPI) reboot(w http.ResponseWriter, r *http.Request) {
 
 func (d *DebugAPI) shutdown(w http.ResponseWriter, r *http.Request) {
 	imei := r.PathValue("imei")
-	if err := d.srv.SendToDevice(imei, protocol.BuildShutdown(), protocol.MsgRestart, "CMD"); err != nil {
+	if err := d.handler.ExecuteRPC(r.Context(), imei, "shutdown", nil); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
@@ -75,15 +77,15 @@ func (d *DebugAPI) interval(w http.ResponseWriter, r *http.Request) {
 	sent := map[string]any{}
 	if req.LocationSeconds != nil {
 		frame := protocol.BuildUploadInterval(*req.LocationSeconds)
-		if err := d.srv.SendToDevice(imei, frame, protocol.MsgUploadInt, "CMD"); err != nil {
+		if err := d.srv.SendToDevice(imei, frame); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 			return
 		}
 		sent["location_seconds"] = *req.LocationSeconds
 	}
 	if req.StatusMinutes != nil {
-		frame := protocol.BuildStatusInterval(*req.StatusMinutes)
-		if err := d.srv.SendToDevice(imei, frame, protocol.MsgStatus, "CMD"); err != nil {
+		frame := protocol.BuildStatusInterval(int(*req.StatusMinutes))
+		if err := d.srv.SendToDevice(imei, frame); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 			return
 		}
@@ -94,7 +96,7 @@ func (d *DebugAPI) interval(w http.ResponseWriter, r *http.Request) {
 
 func (d *DebugAPI) locate(w http.ResponseWriter, r *http.Request) {
 	imei := r.PathValue("imei")
-	if err := d.srv.SendToDevice(imei, protocol.BuildLocate(), 0x80, "CMD"); err != nil {
+	if err := d.srv.SendToDevice(imei, protocol.BuildLocate()); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}

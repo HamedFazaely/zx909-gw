@@ -369,30 +369,15 @@ func (s *Server) ListSessions() []SessionInfo {
 	return out
 }
 
-func (s *Server) SendToDevice(imei string, payload []byte, proto byte, kind string) error {
+// SendToDevice implements command.SessionLookup.
+// Returns an error if the IMEI has no live TCP session.
+func (s *Server) SendToDevice(imei string, payload []byte) error {
 	s.mu.Lock()
 	sess, ok := s.sessions[imei]
 	s.mu.Unlock()
-	if !ok || sess == nil {
-		return fmt.Errorf("device %s not connected", imei)
+	if !ok {
+		return fmt.Errorf("device %s is offline", imei)
 	}
-	sess.mu.Lock()
-	conn := sess.Conn
-	remote := sess.Remote
-	sess.mu.Unlock()
-	if conn == nil {
-		return fmt.Errorf("device %s has no connection", imei)
-	}
-	_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
-	_, err := conn.Write(payload)
-	if err != nil {
-		return err
-	}
-	slog.Info(kind,
-		"remote", remote,
-		"imei", imei,
-		"proto", protocol.ProtoHex(proto),
-		"hex", hex.EncodeToString(payload),
-	)
-	return nil
+	_, err := sess.Conn.Write(payload)
+	return err
 }
