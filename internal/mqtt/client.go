@@ -11,11 +11,14 @@ import (
 	"github.com/HamedFazaely/zx909-gw/internal/config"
 )
 
+// Client is the abstraction used by the TCP server.
+// It only covers the uplink path (device presence + telemetry).
+// Downward RPC is an implementation detail of GatewayClient.
 type Client interface {
 	Connect(ctx context.Context) error
 	Close()
 	ConnectDevice(deviceName string) error
-	DisconnectDevice(deviceName string) error 
+	DisconnectDevice(deviceName string) error
 	PublishTelemetry(deviceName string, ts time.Time, values map[string]any) error
 }
 
@@ -23,9 +26,14 @@ type Client interface {
 type GatewayClient struct {
 	cfg    config.ThingsBoardConfig
 	client paho.Client
+	rpc    RPCExecutor
 }
 
-func NewGatewayClient(cfg config.ThingsBoardConfig) (*GatewayClient, error) {
+// NewGatewayClient builds a real ThingsBoard Gateway MQTT client.
+// rpc may be nil; in that case incoming RPCs are answered with an error.
+func NewGatewayClient(cfg config.ThingsBoardConfig, rpc RPCExecutor) (*GatewayClient, error) {
+	g := &GatewayClient{cfg: cfg, rpc: rpc}
+
 	opts := paho.NewClientOptions()
 	broker := fmt.Sprintf("tcp://%s:%d", cfg.Host, cfg.Port)
 	opts.AddBroker(broker)
@@ -38,12 +46,20 @@ func NewGatewayClient(cfg config.ThingsBoardConfig) (*GatewayClient, error) {
 	opts.SetConnectionLostHandler(func(_ paho.Client, err error) {
 		slog.Warn("ThingsBoard MQTT connection lost", "error", err)
 	})
-	opts.SetOnConnectHandler(func(_ paho.Client) {
+	// Subscribe (and re-subscribe after reconnect) inside OnConnectHandler.
+	opts.SetOnConnectHandler(func(c paho.Client) {
 		slog.Info("ThingsBoard MQTT (re)connected")
+		token := c.Subscribe("v1/gateway/rpc", cfg.QoS, g.onRPC)
+		token.Wait()
+		if err := token.Error(); err != nil {
+			slog.Error("subscribe v1/gateway/rpc failed", "error", err)
+			return
+		}
+		slog.Info("subscribed to v1/gateway/rpc")
 	})
 
-	c := paho.NewClient(opts)
-	return &GatewayClient{cfg: cfg, client: c}, nil
+	g.client = paho.NewClient(opts)
+	return g, nil
 }
 
 func (g *GatewayClient) Connect(ctx context.Context) error {
@@ -100,4 +116,50 @@ func (g *GatewayClient) publish(topic string, payload []byte) error {
 	token := g.client.Publish(topic, g.cfg.QoS, false, payload)
 	token.Wait()
 	return token.Error()
+}
+
+// onRPC is the Paho callback for messages on v1/gateway/rpc.
+func (g *GatewayClient) onRPC(_ paho.Client, msg paho.Message) {
+	var req GatewayRPCRequest
+	if err := json.Unmarshal(msg.Payload(), &req); err != nil {
+		slog.Warn("invalid gateway RPC payload", "error", err, "raw", string(msg.Payload()))
+		return
+	}
+	if req.Device == "" || req.Data.Method == "" {
+		slog.Warn("gateway RPC missing device or method", "raw", string(msg.Payload()))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var respData any
+	switch {
+	case g.rpc == nil:
+		respData = map[string]any{"success": false, "error": "no RPC handler configured"}
+	case req.Data.Method == "":
+		respData = map[string]any{"success": false, "error": "empty method"}
+	default:
+		if err := g.rpc.ExecuteRPC(ctx, req.Device, req.Data.Method, req.Data.Params); err != nil {
+			slog.Warn("RPC failed", "device", req.Device, "method", req.Data.Method, "id", req.Data.ID, "error", err)
+			respData = map[string]any{"success": false, "error": err.Error()}
+		} else {
+			slog.Info("RPC ok", "device", req.Device, "method", req.Data.Method, "id", req.Data.ID)
+			respData = map[string]any{"success": true}
+		}
+	}
+
+	resp := GatewayRPCResponse{
+		Device: req.Device,
+		ID:     req.Data.ID,
+		Data:   respData,
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		slog.Error("marshal RPC response", "error", err)
+		return
+	}
+	if err := g.publish("v1/gateway/rpc", b); err != nil {
+		slog.Error("publish RPC response", "error", err, "device", req.Device, "id", req.Data.ID)
+	}
 }
