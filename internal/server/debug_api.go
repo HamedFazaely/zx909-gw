@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/HamedFazaely/zx909-gw/internal/command"
-	"github.com/HamedFazaely/zx909-gw/internal/protocol"
 )
 
 // DebugAPI is a localhost-oriented HTTP surface for injecting downlink
@@ -19,8 +18,8 @@ type DebugAPI struct {
 	handler *command.Handler
 }
 
-func NewDebugAPI(srv *Server) *DebugAPI {
-	return &DebugAPI{srv: srv, handler: command.NewHandler(srv, &slog.Logger{})}
+func NewDebugAPI(srv *Server, handler *command.Handler) *DebugAPI {
+	return &DebugAPI{srv: srv, handler: handler}
 }
 
 func (d *DebugAPI) Handler() http.Handler {
@@ -74,29 +73,32 @@ func (d *DebugAPI) interval(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provide location_seconds and/or status_minutes"})
 		return
 	}
+
 	sent := map[string]any{}
+
 	if req.LocationSeconds != nil {
-		frame := protocol.BuildUploadInterval(*req.LocationSeconds)
-		if err := d.srv.SendToDevice(imei, frame); err != nil {
+		params, _ := json.Marshal(map[string]int{"seconds": int(*req.LocationSeconds)})
+		if err := d.handler.ExecuteRPC(r.Context(), imei, "setLocationInterval", params); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 			return
 		}
 		sent["location_seconds"] = *req.LocationSeconds
 	}
 	if req.StatusMinutes != nil {
-		frame := protocol.BuildStatusInterval(int(*req.StatusMinutes))
-		if err := d.srv.SendToDevice(imei, frame); err != nil {
+		params, _ := json.Marshal(map[string]int{"minutes": int(*req.StatusMinutes)})
+		if err := d.handler.ExecuteRPC(r.Context(), imei, "setStatusInterval", params); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 			return
 		}
 		sent["status_minutes"] = *req.StatusMinutes
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imei": imei, "sent": sent})
 }
 
 func (d *DebugAPI) locate(w http.ResponseWriter, r *http.Request) {
 	imei := r.PathValue("imei")
-	if err := d.srv.SendToDevice(imei, protocol.BuildLocate()); err != nil {
+	if err := d.handler.ExecuteRPC(r.Context(), imei, "locate", nil); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
@@ -110,8 +112,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // ListenAndServeDebug starts the debug HTTP server. Blocks until error.
-func ListenAndServeDebug(addr string, srv *Server) error {
-	api := NewDebugAPI(srv)
+func ListenAndServeDebug(addr string, srv *Server, handler *command.Handler) error {
+	api := NewDebugAPI(srv, handler)
 	slog.Info("debug REST listening", "addr", addr,
 		"endpoints", strings.Join([]string{
 			"GET /devices",

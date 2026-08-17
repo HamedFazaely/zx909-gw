@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/HamedFazaely/zx909-gw/internal/command"
 	"github.com/HamedFazaely/zx909-gw/internal/config"
 	"github.com/HamedFazaely/zx909-gw/internal/mqtt"
 	"github.com/HamedFazaely/zx909-gw/internal/server"
@@ -30,12 +31,15 @@ func main() {
 
 	srv := server.New(cfg.Server, tb)
 
+	// Single source of truth for device commands (debug REST + future MQTT RPC).
+	cmdHandler := command.NewHandler(srv, slog.Default())
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	if cfg.Server.DebugAPI != "" {
 		go func() {
-			if err := server.ListenAndServeDebug(cfg.Server.DebugAPI, srv); err != nil {
+			if err := server.ListenAndServeDebug(cfg.Server.DebugAPI, srv, cmdHandler); err != nil {
 				slog.Error("debug API stopped", "error", err)
 			}
 		}()
