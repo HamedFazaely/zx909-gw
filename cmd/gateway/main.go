@@ -34,32 +34,38 @@ func main() {
 	}
 
 	var tb mqtt.Client
-
 	if cfg.ThingsBoard.UseMock {
 		tb = mqtt.NewMockClient()
+		slog.Info("MQTT mode: mock (device-protocol focus; no broker connection)")
 	} else {
 		tb, err = mqtt.NewGatewayClient(cfg.ThingsBoard)
 		if err != nil {
 			slog.Error("gateway client creation failed", "error", err)
 			os.Exit(1)
 		}
+		slog.Info("MQTT mode: real ThingsBoard Gateway API",
+			"broker", cfg.ThingsBoard.Host,
+			"port", cfg.ThingsBoard.Port,
+			"client_id", cfg.ThingsBoard.ClientID,
+		)
 	}
 
 	srv := server.New(cfg.Server, tb, geo)
 
-	// Single source of truth for device commands (debug REST + future MQTT RPC).
+	// Single source of truth for device commands (debug REST + MQTT RPC).
 	cmdHandler := command.NewHandler(srv, slog.Default())
-	if !cfg.ThingsBoard.UseMock {
-		tb.(*mqtt.GatewayClient).SetRPCExecutor(cmdHandler)
+	if gc, ok := tb.(*mqtt.GatewayClient); ok {
+		gc.SetRPCExecutor(cmdHandler)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	err = tb.Connect(ctx)
-	if err != nil {
-		slog.Error("connecting to tb failed", "error", err)
+
+	if err := tb.Connect(ctx); err != nil {
+		slog.Error("connecting to ThingsBoard MQTT failed", "error", err)
 		os.Exit(1)
 	}
+	defer tb.Close()
 
 	if cfg.Server.DebugAPI != "" {
 		go func() {

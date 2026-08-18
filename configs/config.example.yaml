@@ -8,12 +8,14 @@ server:
 thingsboard:
   host: "localhost"
   port: 1883
+  # Typical CE setup: username = access token, password empty.
   access_token: "YOUR_GATEWAY_TOKEN"
   client_id: "zx909-gw"
-  password: "YOUR_GATEWAY_PASSWORD"
+  password: ""
   device_profile: "pet-tracker"
   qos: 1
   keepalive: 30s
+  # true = no broker (protocol work); false = real Gateway MQTT API
   use_mock: true
 
 # Optional LBS/Wi-Fi → coordinates. When enabled=false (default):
