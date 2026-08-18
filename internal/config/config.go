@@ -33,6 +33,7 @@ type ThingsBoardConfig struct {
 	DeviceProfile string        `yaml:"device_profile"`
 	QoS           byte          `yaml:"qos"`
 	KeepAlive     time.Duration `yaml:"keepalive"`
+	UseMock       bool          `yaml:"use_mock"`
 }
 
 // GeolocationConfig controls optional LBS/Wi-Fi → lat/lon resolution.

@@ -33,16 +33,25 @@ func main() {
 		slog.Info("geolocation disabled (LBS/Wi-Fi will not publish location telemetry)")
 	}
 
-	tb, err := mqtt.NewGatewayClient(cfg.ThingsBoard)
-	if err != nil {
-		slog.Error("gateway client creation failed", "error", err)
-		os.Exit(1)
+	var tb mqtt.Client
+
+	if cfg.ThingsBoard.UseMock {
+		tb = mqtt.NewMockClient()
+	} else {
+		tb, err = mqtt.NewGatewayClient(cfg.ThingsBoard)
+		if err != nil {
+			slog.Error("gateway client creation failed", "error", err)
+			os.Exit(1)
+		}
 	}
+
 	srv := server.New(cfg.Server, tb, geo)
 
 	// Single source of truth for device commands (debug REST + future MQTT RPC).
 	cmdHandler := command.NewHandler(srv, slog.Default())
-	tb.SetRPCExecutor(cmdHandler)
+	if !cfg.ThingsBoard.UseMock {
+		tb.(*mqtt.GatewayClient).SetRPCExecutor(cmdHandler)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
