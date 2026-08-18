@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/HamedFazaely/zx909-gw/internal/config"
+	"github.com/HamedFazaely/zx909-gw/internal/geolocation"
 	"github.com/HamedFazaely/zx909-gw/internal/mqtt"
 	"github.com/HamedFazaely/zx909-gw/internal/protocol"
 )
@@ -19,6 +21,7 @@ import (
 type Server struct {
 	cfg      config.ServerConfig
 	tb       mqtt.Client
+	geo      geolocation.Client
 	ln       net.Listener
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -82,10 +85,14 @@ type SessionInfo struct {
 	LastSeen  time.Time `json:"last_seen"`
 }
 
-func New(cfg config.ServerConfig, tb mqtt.Client) *Server {
+func New(cfg config.ServerConfig, tb mqtt.Client, geo geolocation.Client) *Server {
+	if geo == nil {
+		geo = geolocation.Disabled{}
+	}
 	return &Server{
 		cfg:      cfg,
 		tb:       tb,
+		geo:      geo,
 		sessions: make(map[string]*Session),
 	}
 }
@@ -211,6 +218,19 @@ func (s *Server) writeFrame(sc *SafeConn, remote, imei string, proto byte, paylo
 	)
 }
 
+// publishLocation sends the unified location telemetry shape to ThingsBoard.
+func (s *Server) publishLocation(imei string, ts time.Time, values map[string]any) {
+	if imei == "" {
+		return
+	}
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	if err := s.tb.PublishTelemetry(imei, ts, values); err != nil {
+		slog.Warn("publish location failed", "imei", imei, "error", err)
+	}
+}
+
 func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame, imei *string, sess **Session) {
 	switch frame.Proto {
 	case protocol.MsgLogin:
@@ -286,24 +306,18 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 				"body_len", len(frame.Body), "proto", protocol.ProtoHex(frame.Proto), "body", hex.EncodeToString(frame.Body))
 		} else {
 			values := map[string]any{
-				"latitude":   pos.Latitude,
-				"longitude":  pos.Longitude,
-				"speed":      pos.SpeedKmh,
-				"course":     pos.Course,
-				"satellites": pos.Satellites,
-				"valid":      pos.Valid,
+				"position_type": "gps",
+				"latitude":      pos.Latitude,
+				"longitude":     pos.Longitude,
+				"speed":         pos.SpeedKmh,
+				"course":        pos.Course,
+				"satellites":    pos.Satellites,
+				"valid":         pos.Valid,
 			}
-			ts := pos.Time
-			if ts.IsZero() {
-				ts = time.Now().UTC()
-			}
-			if err := s.tb.PublishTelemetry(*imei, ts, values); err != nil {
-				slog.Warn("publish telemetry failed", "imei", *imei, "error", err)
-			} else {
-				slog.Info("gps", "imei", *imei, "summary", pos.String(),
-					"lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh,
-					"course", pos.Course, "sats", pos.Satellites, "valid", pos.Valid)
-			}
+			s.publishLocation(*imei, pos.Time, values)
+			slog.Info("gps", "imei", *imei, "summary", pos.String(),
+				"lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh,
+				"course", pos.Course, "sats", pos.Satellites, "valid", pos.Valid)
 		}
 		dt := protocol.DatetimeFromBody(frame.Body)
 		s.writeFrame(sc, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
@@ -319,24 +333,9 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		} else {
 			slog.Info("wifi/lbs", "imei", *imei, "proto", protocol.ProtoHex(frame.Proto), "summary", wl.String(),
 				"wifi_count", len(wl.Wifi), "cell_count", len(wl.Cells))
-			if *imei != "" {
-				values := map[string]any{
-					"lbs_wifi_count": len(wl.Wifi),
-					"lbs_cell_count": len(wl.Cells),
-					"position_type":  "lbs_wifi",
-				}
-				if len(wl.Cells) > 0 {
-					c := wl.Cells[0]
-					values["mcc"] = c.MCC
-					values["mnc"] = c.MNC
-					values["lac"] = c.LAC
-					values["cell_id"] = c.CellID
-				}
-				ts := wl.Time
-				if ts.IsZero() {
-					ts = time.Now().UTC()
-				}
-				_ = s.tb.PublishTelemetry(*imei, ts, values)
+			// ACK first — never block the device on an external HTTP call.
+			if *imei != "" && s.geo.Enabled() {
+				go s.resolveAndPublishLBS(*imei, wl)
 			}
 		}
 		dt := protocol.DatetimeFromBody(frame.Body)
@@ -355,6 +354,43 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 			"raw", frame.Hex(),
 		)
 	}
+}
+
+// resolveAndPublishLBS calls the geolocation API and publishes unified location
+// telemetry only on success. Runs in its own goroutine.
+func (s *Server) resolveAndPublishLBS(imei string, wl *protocol.WifiLBS) {
+	req := geolocation.Request{
+		Wifi:  make([]geolocation.WifiAP, 0, len(wl.Wifi)),
+		Cells: make([]geolocation.CellTower, 0, len(wl.Cells)),
+	}
+	for _, w := range wl.Wifi {
+		req.Wifi = append(req.Wifi, geolocation.WifiAP{MAC: w.MAC, RSSI: w.RSSI})
+	}
+	for _, c := range wl.Cells {
+		req.Cells = append(req.Cells, geolocation.CellTower{
+			MCC: c.MCC, MNC: c.MNC, LAC: c.LAC, CellID: c.CellID, Signal: c.Signal,
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := s.geo.Locate(ctx, req)
+	if err != nil {
+		slog.Debug("geolocation failed", "imei", imei, "error", err,
+			"wifi", len(req.Wifi), "cells", len(req.Cells))
+		return
+	}
+
+	values := map[string]any{
+		"position_type": "lbs_wifi",
+		"latitude":      res.Latitude,
+		"longitude":     res.Longitude,
+	}
+	ts := wl.Time
+	s.publishLocation(imei, ts, values)
+	slog.Info("lbs_wifi location", "imei", imei,
+		"lat", res.Latitude, "lon", res.Longitude, "accuracy_m", res.Accuracy)
 }
 
 func (s *Server) registerSession(imei string, sc *SafeConn, remote string) *Session {

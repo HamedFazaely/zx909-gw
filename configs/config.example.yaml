@@ -14,5 +14,13 @@ thingsboard:
   qos: 1
   keepalive: 30s
 
+# Optional LBS/Wi-Fi → coordinates. When enabled=false (default):
+# no external API call and no LBS location telemetry is published.
+geolocation:
+  enabled: false
+  url: "https://location.example.com/v1/geolocate"
+  api_key: ""
+  timeout: 3s
+
 logging:
   level: info

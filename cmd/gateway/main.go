@@ -10,6 +10,7 @@ import (
 
 	"github.com/HamedFazaely/zx909-gw/internal/command"
 	"github.com/HamedFazaely/zx909-gw/internal/config"
+	"github.com/HamedFazaely/zx909-gw/internal/geolocation"
 	"github.com/HamedFazaely/zx909-gw/internal/mqtt"
 	"github.com/HamedFazaely/zx909-gw/internal/server"
 )
@@ -29,7 +30,14 @@ func main() {
 	tb := mqtt.NewMockClient()
 	slog.Info("using mock MQTT client (device-protocol focus)")
 
-	srv := server.New(cfg.Server, tb)
+	geo := geolocation.NewClient(cfg.Geolocation)
+	if geo.Enabled() {
+		slog.Info("geolocation enabled", "url", cfg.Geolocation.URL)
+	} else {
+		slog.Info("geolocation disabled (LBS/Wi-Fi will not publish location telemetry)")
+	}
+
+	srv := server.New(cfg.Server, tb, geo)
 
 	// Single source of truth for device commands (debug REST + future MQTT RPC).
 	cmdHandler := command.NewHandler(srv, slog.Default())

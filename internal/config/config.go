@@ -9,9 +9,10 @@ import (
 )
 
 type Config struct {
-	Server      ServerConfig      `yaml:"server"`
-	ThingsBoard ThingsBoardConfig `yaml:"thingsboard"`
-	Logging     LoggingConfig     `yaml:"logging"`
+	Server       ServerConfig       `yaml:"server"`
+	ThingsBoard  ThingsBoardConfig  `yaml:"thingsboard"`
+	Geolocation  GeolocationConfig  `yaml:"geolocation"`
+	Logging      LoggingConfig      `yaml:"logging"`
 }
 
 type ServerConfig struct {
@@ -31,6 +32,14 @@ type ThingsBoardConfig struct {
 	DeviceProfile string        `yaml:"device_profile"`
 	QoS           byte          `yaml:"qos"`
 	KeepAlive     time.Duration `yaml:"keepalive"`
+}
+
+// GeolocationConfig controls optional LBS/Wi-Fi → lat/lon resolution.
+type GeolocationConfig struct {
+	Enabled bool          `yaml:"enabled"`
+	URL     string        `yaml:"url"`
+	APIKey  string        `yaml:"api_key"`
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 type LoggingConfig struct {
@@ -71,6 +80,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.ThingsBoard.ClientID == "" {
 		cfg.ThingsBoard.ClientID = "zx909-gw"
+	}
+	if cfg.Geolocation.Timeout == 0 {
+		cfg.Geolocation.Timeout = 3 * time.Second
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
