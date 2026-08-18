@@ -26,14 +26,52 @@ type Server struct {
 	closing  bool
 }
 
+// SafeConn serialises all writes to an underlying net.Conn.
+// Reads stay unlocked — only the session goroutine reads.
+type SafeConn struct {
+	conn net.Conn
+	mu   sync.Mutex
+}
+
+func NewSafeConn(c net.Conn) *SafeConn {
+	return &SafeConn{conn: c}
+}
+
+// WriteWithDeadline is the only supported way to send bytes on the connection.
+func (sc *SafeConn) WriteWithDeadline(b []byte, d time.Duration) error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	_ = sc.conn.SetWriteDeadline(time.Now().Add(d))
+	_, err := sc.conn.Write(b)
+	return err
+}
+
+func (sc *SafeConn) Read(b []byte) (int, error) {
+	return sc.conn.Read(b)
+}
+
+func (sc *SafeConn) Close() error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.conn.Close()
+}
+
+func (sc *SafeConn) RemoteAddr() net.Addr {
+	return sc.conn.RemoteAddr()
+}
+
+func (sc *SafeConn) SetReadDeadline(t time.Time) error {
+	return sc.conn.SetReadDeadline(t)
+}
+
 // Session is one live tracker TCP connection keyed by IMEI after login.
 type Session struct {
 	IMEI      string
-	Conn      net.Conn
+	Conn      *SafeConn
 	Remote    string
 	Connected time.Time
 	LastSeen  time.Time
-	mu        sync.Mutex
+	mu        sync.Mutex // protects LastSeen only
 }
 
 // SessionInfo is a snapshot for the debug API.
@@ -73,7 +111,7 @@ func (s *Server) ListenAndServe() error {
 			continue
 		}
 		s.wg.Add(1)
-		go s.handleConn(conn)
+		go s.handleConn(NewSafeConn(conn))
 	}
 }
 
@@ -87,11 +125,11 @@ func (s *Server) Shutdown() {
 	s.wg.Wait()
 }
 
-func (s *Server) handleConn(conn net.Conn) {
+func (s *Server) handleConn(sc *SafeConn) {
 	defer s.wg.Done()
-	defer conn.Close()
+	defer sc.Close()
 
-	remote := conn.RemoteAddr().String()
+	remote := sc.RemoteAddr().String()
 	slog.Info("tracker connected", "remote", remote)
 
 	var (
@@ -112,8 +150,8 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	tmp := make([]byte, 4096)
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
-		n, err := conn.Read(tmp)
+		_ = sc.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
+		n, err := sc.Read(tmp)
 		if err != nil {
 			if err != io.EOF {
 				slog.Debug("read error", "remote", remote, "error", err)
@@ -121,11 +159,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			return
 		}
 		buf = append(buf, tmp[:n]...)
-		buf = s.drainFrames(conn, remote, buf, &imei, &sess)
+		buf = s.drainFrames(sc, remote, buf, &imei, &sess)
 	}
 }
 
-func (s *Server) drainFrames(conn net.Conn, remote string, buf []byte, imei *string, sess **Session) []byte {
+func (s *Server) drainFrames(sc *SafeConn, remote string, buf []byte, imei *string, sess **Session) []byte {
 	for {
 		frame, consumed, err := protocol.ExtractFrame(buf)
 		if err == protocol.ErrIncomplete {
@@ -155,15 +193,13 @@ func (s *Server) drainFrames(conn net.Conn, remote string, buf []byte, imei *str
 			"raw", frame.Hex(),
 		)
 
-		s.handleFrame(conn, remote, frame, imei, sess)
+		s.handleFrame(sc, remote, frame, imei, sess)
 	}
 	return buf
 }
 
-func (s *Server) writeFrame(conn net.Conn, remote, imei string, proto byte, payload []byte, kind string) {
-	_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
-	_, err := conn.Write(payload)
-	if err != nil {
+func (s *Server) writeFrame(sc *SafeConn, remote, imei string, proto byte, payload []byte, kind string) {
+	if err := sc.WriteWithDeadline(payload, s.cfg.WriteTimeout); err != nil {
 		slog.Warn(kind+" write failed", "remote", remote, "imei", imei, "proto", protocol.ProtoHex(proto), "error", err)
 		return
 	}
@@ -175,34 +211,34 @@ func (s *Server) writeFrame(conn net.Conn, remote, imei string, proto byte, payl
 	)
 }
 
-func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame, imei *string, sess **Session) {
+func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame, imei *string, sess **Session) {
 	switch frame.Proto {
 	case protocol.MsgLogin:
 		id, err := protocol.ParseLogin(frame.Body)
 		if err != nil {
 			slog.Warn("login parse failed", "error", err, "remote", remote, "body", hex.EncodeToString(frame.Body))
-			s.writeFrame(conn, remote, "", protocol.MsgLogin, protocol.BuildLoginACK(), "ACK")
+			s.writeFrame(sc, remote, "", protocol.MsgLogin, protocol.BuildLoginACK(), "ACK")
 			return
 		}
 		*imei = id
-		*sess = s.registerSession(id, conn, remote)
+		*sess = s.registerSession(id, sc, remote)
 		_ = s.tb.ConnectDevice(id)
 		slog.Info("login ok", "imei", id, "remote", remote)
-		s.writeFrame(conn, remote, id, protocol.MsgLogin, protocol.BuildLoginACK(), "ACK")
+		s.writeFrame(sc, remote, id, protocol.MsgLogin, protocol.BuildLoginACK(), "ACK")
 
 	case protocol.MsgTimeSync:
 		if *sess != nil {
 			(*sess).touch()
 		}
 		reply := protocol.BuildTimeSyncReply(time.Now())
-		s.writeFrame(conn, remote, *imei, protocol.MsgTimeSync, reply, "ACK")
+		s.writeFrame(sc, remote, *imei, protocol.MsgTimeSync, reply, "ACK")
 
 	case protocol.MsgParam:
 		if *sess != nil {
 			(*sess).touch()
 		}
 		reply := protocol.BuildDefaultSettings()
-		s.writeFrame(conn, remote, *imei, protocol.MsgParam, reply, "ACK")
+		s.writeFrame(sc, remote, *imei, protocol.MsgParam, reply, "ACK")
 
 	case protocol.MsgICCID:
 		if *sess != nil {
@@ -234,7 +270,7 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 				})
 			}
 		}
-		s.writeFrame(conn, remote, *imei, protocol.MsgStatus, protocol.BuildStatusEcho(frame.Raw), "ACK")
+		s.writeFrame(sc, remote, *imei, protocol.MsgStatus, protocol.BuildStatusEcho(frame.Raw), "ACK")
 
 	case protocol.MsgGPS, protocol.MsgGPSLBS, protocol.MsgGPS2, protocol.MsgGPSOffline:
 		if *imei == "" {
@@ -270,7 +306,7 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 			}
 		}
 		dt := protocol.DatetimeFromBody(frame.Body)
-		s.writeFrame(conn, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
+		s.writeFrame(sc, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
 
 	case protocol.MsgWifiLBS, protocol.MsgWifiLBS2, protocol.MsgOfflineWifi, protocol.MsgOnlineWifi:
 		if *sess != nil {
@@ -304,7 +340,7 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 			}
 		}
 		dt := protocol.DatetimeFromBody(frame.Body)
-		s.writeFrame(conn, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
+		s.writeFrame(sc, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
 
 	default:
 		if *sess != nil {
@@ -321,15 +357,15 @@ func (s *Server) handleFrame(conn net.Conn, remote string, frame *protocol.Frame
 	}
 }
 
-func (s *Server) registerSession(imei string, conn net.Conn, remote string) *Session {
+func (s *Server) registerSession(imei string, sc *SafeConn, remote string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.sessions[imei]; ok && old.Conn != conn {
+	if old, ok := s.sessions[imei]; ok && old.Conn != sc {
 		_ = old.Conn.Close()
 	}
 	sess := &Session{
 		IMEI:      imei,
-		Conn:      conn,
+		Conn:      sc,
 		Remote:    remote,
 		Connected: time.Now(),
 		LastSeen:  time.Now(),
@@ -378,6 +414,5 @@ func (s *Server) SendToDevice(imei string, payload []byte) error {
 	if !ok {
 		return fmt.Errorf("device %s is offline", imei)
 	}
-	_, err := sess.Conn.Write(payload)
-	return err
+	return sess.Conn.WriteWithDeadline(payload, s.cfg.WriteTimeout)
 }
