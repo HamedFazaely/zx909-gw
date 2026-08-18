@@ -26,10 +26,6 @@ func main() {
 	}
 	setupLogging(cfg.Logging.Level)
 
-	// Protocol work: always use mock MQTT for now.
-	tb := mqtt.NewMockClient()
-	slog.Info("using mock MQTT client (device-protocol focus)")
-
 	geo := geolocation.NewClient(cfg.Geolocation)
 	if geo.Enabled() {
 		slog.Info("geolocation enabled", "url", cfg.Geolocation.URL)
@@ -37,13 +33,24 @@ func main() {
 		slog.Info("geolocation disabled (LBS/Wi-Fi will not publish location telemetry)")
 	}
 
+	tb, err := mqtt.NewGatewayClient(cfg.ThingsBoard)
+	if err != nil {
+		slog.Error("gateway client creation failed", "error", err)
+		os.Exit(1)
+	}
 	srv := server.New(cfg.Server, tb, geo)
 
 	// Single source of truth for device commands (debug REST + future MQTT RPC).
 	cmdHandler := command.NewHandler(srv, slog.Default())
+	tb.SetRPCExecutor(cmdHandler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	err = tb.Connect(ctx)
+	if err != nil {
+		slog.Error("connecting to tb failed", "error", err)
+		os.Exit(1)
+	}
 
 	if cfg.Server.DebugAPI != "" {
 		go func() {

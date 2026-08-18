@@ -30,9 +30,8 @@ type GatewayClient struct {
 }
 
 // NewGatewayClient builds a real ThingsBoard Gateway MQTT client.
-// rpc may be nil; in that case incoming RPCs are answered with an error.
-func NewGatewayClient(cfg config.ThingsBoardConfig, rpc RPCExecutor) (*GatewayClient, error) {
-	g := &GatewayClient{cfg: cfg, rpc: rpc}
+func NewGatewayClient(cfg config.ThingsBoardConfig) (*GatewayClient, error) {
+	g := &GatewayClient{cfg: cfg}
 
 	opts := paho.NewClientOptions()
 	broker := fmt.Sprintf("tcp://%s:%d", cfg.Host, cfg.Port)
@@ -61,6 +60,10 @@ func NewGatewayClient(cfg config.ThingsBoardConfig, rpc RPCExecutor) (*GatewayCl
 
 	g.client = paho.NewClient(opts)
 	return g, nil
+}
+
+func (g *GatewayClient) SetRPCExecutor(rpc RPCExecutor) {
+	g.rpc = rpc
 }
 
 func (g *GatewayClient) Connect(ctx context.Context) error {

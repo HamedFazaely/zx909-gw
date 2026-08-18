@@ -1,0 +1,45 @@
+curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "reboot",
+    "params": {},
+    "timeout": 10000
+  }'
+
+
+
+
+
+  curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "locate",
+    "params": {},
+    "timeout": 10000
+  }'
+
+
+
+
+
+  curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "setLocationInterval",
+    "params": { "seconds": 60 },
+    "timeout": 10000
+  }'
+
+
+
+  curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "method": "setStatusInterval",
+    "params": { "minutes": 2 },
+    "timeout": 10000
+  }'
