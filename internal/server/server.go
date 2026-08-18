@@ -23,7 +23,7 @@ type Server struct {
 	tb       mqtt.Client
 	geo      geolocation.Client
 	ln       net.Listener
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	sessions map[string]*Session
 	wg       sync.WaitGroup
 	closing  bool
@@ -74,7 +74,7 @@ type Session struct {
 	Remote    string
 	Connected time.Time
 	LastSeen  time.Time
-	mu        sync.Mutex // protects LastSeen only
+	mu        sync.RWMutex // protects LastSeen
 }
 
 // SessionInfo is a snapshot for the debug API.
@@ -108,9 +108,9 @@ func (s *Server) ListenAndServe() error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			s.mu.Lock()
+			s.mu.RLock()
 			closing := s.closing
-			s.mu.Unlock()
+			s.mu.RUnlock()
 			if closing {
 				return nil
 			}
@@ -425,18 +425,18 @@ func (s *Session) touch() {
 }
 
 func (s *Server) ListSessions() []SessionInfo {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := make([]SessionInfo, 0, len(s.sessions))
 	for _, sess := range s.sessions {
-		sess.mu.Lock()
+		sess.mu.RLock()
 		out = append(out, SessionInfo{
 			IMEI:      sess.IMEI,
 			Remote:    sess.Remote,
 			Connected: sess.Connected,
 			LastSeen:  sess.LastSeen,
 		})
-		sess.mu.Unlock()
+		sess.mu.RUnlock()
 	}
 	return out
 }
@@ -444,9 +444,9 @@ func (s *Server) ListSessions() []SessionInfo {
 // SendToDevice implements command.SessionLookup.
 // Returns an error if the IMEI has no live TCP session.
 func (s *Server) SendToDevice(imei string, payload []byte) error {
-	s.mu.Lock()
+	s.mu.RLock()
 	sess, ok := s.sessions[imei]
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("device %s is offline", imei)
 	}
