@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"time"
 
-	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/HamedFazaely/zx909-gw/internal/config"
+	paho "github.com/eclipse/paho.mqtt.golang"
 )
 
 // Client is the abstraction used by the TCP server.
@@ -39,6 +39,7 @@ func NewGatewayClient(cfg config.ThingsBoardConfig, rpc RPCExecutor) (*GatewayCl
 	opts.AddBroker(broker)
 	opts.SetClientID(cfg.ClientID)
 	opts.SetUsername(cfg.AccessToken)
+	opts.SetPassword(cfg.Password)
 	opts.SetKeepAlive(cfg.KeepAlive)
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)

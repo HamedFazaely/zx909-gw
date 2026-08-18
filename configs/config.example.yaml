@@ -10,6 +10,7 @@ thingsboard:
   port: 1883
   access_token: "YOUR_GATEWAY_TOKEN"
   client_id: "zx909-gw"
+  password: "YOUR_GATEWAY_PASSWORD"
   device_profile: "pet-tracker"
   qos: 1
   keepalive: 30s

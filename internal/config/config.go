@@ -9,10 +9,10 @@ import (
 )
 
 type Config struct {
-	Server       ServerConfig       `yaml:"server"`
-	ThingsBoard  ThingsBoardConfig  `yaml:"thingsboard"`
-	Geolocation  GeolocationConfig  `yaml:"geolocation"`
-	Logging      LoggingConfig      `yaml:"logging"`
+	Server      ServerConfig      `yaml:"server"`
+	ThingsBoard ThingsBoardConfig `yaml:"thingsboard"`
+	Geolocation GeolocationConfig `yaml:"geolocation"`
+	Logging     LoggingConfig     `yaml:"logging"`
 }
 
 type ServerConfig struct {
@@ -29,6 +29,7 @@ type ThingsBoardConfig struct {
 	Port          int           `yaml:"port"`
 	AccessToken   string        `yaml:"access_token"`
 	ClientID      string        `yaml:"client_id"`
+	Password      string        `yaml:"password"`
 	DeviceProfile string        `yaml:"device_profile"`
 	QoS           byte          `yaml:"qos"`
 	KeepAlive     time.Duration `yaml:"keepalive"`
