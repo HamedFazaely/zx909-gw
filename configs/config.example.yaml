@@ -10,10 +10,11 @@ thingsboard:
   port: 1883
   access_token: "YOUR_GATEWAY_TOKEN"
   client_id: "zx909-gw"
-  password: "YOUR_GATEWAY_PASSWORD"
+  password: ""
   device_profile: "pet-tracker"
   qos: 1
   keepalive: 30s
+  use_mock: true
 
 # Optional LBS/Wi-Fi → coordinates. When enabled=false (default):
 # no external API call and no LBS location telemetry is published.
@@ -22,6 +23,17 @@ geolocation:
   url: "https://location.example.com/v1/geolocate"
   api_key: ""
   timeout: 3s
+
+# Claim-before-uplink: only registered IMEIs get TB connect/telemetry.
+# When enabled=false (default), every IMEI is treated as registered.
+paapeli:
+  enabled: false
+  base_url: "https://paapeli.example.com"
+  username: "tracker@gmail.com"
+  password: "gw_password"
+  timeout: 3s
+  positive_ttl: 30m   # cache when registered=true
+  negative_ttl: 60s   # cache when registered=false (short so claim is picked up)
 
 logging:
   level: info

@@ -12,6 +12,7 @@ import (
 	"github.com/HamedFazaely/zx909-gw/internal/config"
 	"github.com/HamedFazaely/zx909-gw/internal/geolocation"
 	"github.com/HamedFazaely/zx909-gw/internal/mqtt"
+	"github.com/HamedFazaely/zx909-gw/internal/registry"
 	"github.com/HamedFazaely/zx909-gw/internal/server"
 )
 
@@ -33,24 +34,44 @@ func main() {
 		slog.Info("geolocation disabled (LBS/Wi-Fi will not publish location telemetry)")
 	}
 
-	tb, err := mqtt.NewGatewayClient(cfg.ThingsBoard)
-	if err != nil {
-		slog.Error("gateway client creation failed", "error", err)
-		os.Exit(1)
+	reg := registry.New(cfg.Paapeli)
+	if reg.Enabled() {
+		slog.Info("paapeli registration checks enabled", "base_url", cfg.Paapeli.BaseURL)
+	} else {
+		slog.Info("paapeli registration checks disabled (all IMEIs allowed on TB uplink)")
 	}
-	srv := server.New(cfg.Server, tb, geo)
 
-	// Single source of truth for device commands (debug REST + future MQTT RPC).
+	var tb mqtt.Client
+	if cfg.ThingsBoard.UseMock {
+		tb = mqtt.NewMockClient()
+		slog.Info("MQTT mode: mock")
+	} else {
+		tb, err = mqtt.NewGatewayClient(cfg.ThingsBoard)
+		if err != nil {
+			slog.Error("gateway client creation failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("MQTT mode: real ThingsBoard Gateway API",
+			"broker", cfg.ThingsBoard.Host,
+			"port", cfg.ThingsBoard.Port,
+		)
+	}
+
+	srv := server.New(cfg.Server, tb, geo, reg)
+
 	cmdHandler := command.NewHandler(srv, slog.Default())
-	tb.SetRPCExecutor(cmdHandler)
+	if gc, ok := tb.(*mqtt.GatewayClient); ok {
+		gc.SetRPCExecutor(cmdHandler)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	err = tb.Connect(ctx)
-	if err != nil {
-		slog.Error("connecting to tb failed", "error", err)
+
+	if err := tb.Connect(ctx); err != nil {
+		slog.Error("connecting to ThingsBoard MQTT failed", "error", err)
 		os.Exit(1)
 	}
+	defer tb.Close()
 
 	if cfg.Server.DebugAPI != "" {
 		go func() {

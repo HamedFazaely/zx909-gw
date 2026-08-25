@@ -14,6 +14,7 @@ import (
 	"github.com/HamedFazaely/zx909-gw/internal/geolocation"
 	"github.com/HamedFazaely/zx909-gw/internal/mqtt"
 	"github.com/HamedFazaely/zx909-gw/internal/protocol"
+	"github.com/HamedFazaely/zx909-gw/internal/registry"
 )
 
 // Server accepts tracker TCP connections and publishes to ThingsBoard (or mock)
@@ -22,6 +23,7 @@ type Server struct {
 	cfg      config.ServerConfig
 	tb       mqtt.Client
 	geo      geolocation.Client
+	reg      registry.Registry
 	ln       net.Listener
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -69,30 +71,36 @@ func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 
 // Session is one live tracker TCP connection keyed by IMEI after login.
 type Session struct {
-	IMEI      string
-	Conn      *SafeConn
-	Remote    string
-	Connected time.Time
-	LastSeen  time.Time
-	mu        sync.RWMutex // protects LastSeen
+	IMEI        string
+	Conn        *SafeConn
+	Remote      string
+	Connected   time.Time
+	LastSeen    time.Time
+	tbConnected bool // true after successful TB ConnectDevice for this session
+	mu          sync.RWMutex
 }
 
 // SessionInfo is a snapshot for the debug API.
 type SessionInfo struct {
-	IMEI      string    `json:"imei"`
-	Remote    string    `json:"remote"`
-	Connected time.Time `json:"connected"`
-	LastSeen  time.Time `json:"last_seen"`
+	IMEI        string    `json:"imei"`
+	Remote      string    `json:"remote"`
+	Connected   time.Time `json:"connected"`
+	LastSeen    time.Time `json:"last_seen"`
+	TBConnected bool      `json:"tb_connected"`
 }
 
-func New(cfg config.ServerConfig, tb mqtt.Client, geo geolocation.Client) *Server {
+func New(cfg config.ServerConfig, tb mqtt.Client, geo geolocation.Client, reg registry.Registry) *Server {
 	if geo == nil {
 		geo = geolocation.Disabled{}
+	}
+	if reg == nil {
+		reg = registry.AllowAll{}
 	}
 	return &Server{
 		cfg:      cfg,
 		tb:       tb,
 		geo:      geo,
+		reg:      reg,
 		sessions: make(map[string]*Session),
 	}
 }
@@ -148,7 +156,9 @@ func (s *Server) handleConn(sc *SafeConn) {
 	defer func() {
 		if imei != "" {
 			s.removeSession(imei, sess)
-			_ = s.tb.DisconnectDevice(imei)
+			if sess != nil && sess.tbConnectedLocked() {
+				_ = s.tb.DisconnectDevice(imei)
+			}
 			slog.Info("tracker disconnected", "imei", imei, "remote", remote)
 		} else {
 			slog.Info("tracker disconnected (no login)", "remote", remote)
@@ -218,9 +228,23 @@ func (s *Server) writeFrame(sc *SafeConn, remote, imei string, proto byte, paylo
 	)
 }
 
+// uplinkAllowed reports whether TB publish/connect is allowed for this IMEI.
+// Uses the registry cache; safe to call from the session goroutine.
+func (s *Server) uplinkAllowed(imei string) bool {
+	if imei == "" {
+		return false
+	}
+	if !s.reg.Enabled() {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.reg.IsRegistered(ctx, imei)
+}
+
 // publishLocation sends the unified location telemetry shape to ThingsBoard.
 func (s *Server) publishLocation(imei string, ts time.Time, values map[string]any) {
-	if imei == "" {
+	if imei == "" || !s.uplinkAllowed(imei) {
 		return
 	}
 	if ts.IsZero() {
@@ -229,6 +253,16 @@ func (s *Server) publishLocation(imei string, ts time.Time, values map[string]an
 	if err := s.tb.PublishTelemetry(imei, ts, values); err != nil {
 		slog.Warn("publish location failed", "imei", imei, "error", err)
 	}
+}
+
+func (s *Server) publishTelemetry(imei string, ts time.Time, values map[string]any) {
+	if imei == "" || !s.uplinkAllowed(imei) {
+		return
+	}
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	_ = s.tb.PublishTelemetry(imei, ts, values)
 }
 
 func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame, imei *string, sess **Session) {
@@ -242,9 +276,10 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		}
 		*imei = id
 		*sess = s.registerSession(id, sc, remote)
-		_ = s.tb.ConnectDevice(id)
 		slog.Info("login ok", "imei", id, "remote", remote)
+		// Must-reply first — never block the device on Paapeli/TB.
 		s.writeFrame(sc, remote, id, protocol.MsgLogin, protocol.BuildLoginACK(), "ACK")
+		go s.maybeConnectTB(*sess, id)
 
 	case protocol.MsgTimeSync:
 		if *sess != nil {
@@ -269,9 +304,7 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 			slog.Debug("iccid parse failed", "imei", *imei, "error", err)
 		} else {
 			slog.Info("iccid", "imei", *imei, "iccid", iccid)
-			if *imei != "" {
-				_ = s.tb.PublishTelemetry(*imei, time.Now().UTC(), map[string]any{"iccid": iccid})
-			}
+			s.publishTelemetry(*imei, time.Now().UTC(), map[string]any{"iccid": iccid})
 		}
 
 	case protocol.MsgStatus:
@@ -284,8 +317,8 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		} else {
 			slog.Info("status", "imei", *imei, "summary", st.String(),
 				"battery", st.BatteryPercent, "sw", st.SoftwareVer, "tz", st.Timezone)
-			if *imei != "" && st.BatteryPercent >= 0 {
-				_ = s.tb.PublishTelemetry(*imei, time.Now().UTC(), map[string]any{
+			if st.BatteryPercent >= 0 {
+				s.publishTelemetry(*imei, time.Now().UTC(), map[string]any{
 					"battery": st.BatteryPercent,
 				})
 			}
@@ -333,7 +366,6 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		} else {
 			slog.Info("wifi/lbs", "imei", *imei, "proto", protocol.ProtoHex(frame.Proto), "summary", wl.String(),
 				"wifi_count", len(wl.Wifi), "cell_count", len(wl.Cells))
-			// ACK first — never block the device on an external HTTP call.
 			if *imei != "" && s.geo.Enabled() {
 				go s.resolveAndPublishLBS(*imei, wl)
 			}
@@ -356,9 +388,32 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 	}
 }
 
+// maybeConnectTB runs after login ACK. If the IMEI is registered, announces the
+// child device to ThingsBoard. Safe to call concurrently.
+func (s *Server) maybeConnectTB(sess *Session, imei string) {
+	if sess == nil || imei == "" {
+		return
+	}
+	if !s.uplinkAllowed(imei) {
+		slog.Info("tracker unclaimed — protocol only, no TB uplink", "imei", imei)
+		return
+	}
+	if err := s.tb.ConnectDevice(imei); err != nil {
+		slog.Warn("TB ConnectDevice failed", "imei", imei, "error", err)
+		return
+	}
+	sess.mu.Lock()
+	sess.tbConnected = true
+	sess.mu.Unlock()
+	slog.Info("TB child connected", "imei", imei)
+}
+
 // resolveAndPublishLBS calls the geolocation API and publishes unified location
 // telemetry only on success. Runs in its own goroutine.
 func (s *Server) resolveAndPublishLBS(imei string, wl *protocol.WifiLBS) {
+	if !s.uplinkAllowed(imei) {
+		return
+	}
 	req := geolocation.Request{
 		Wifi:  make([]geolocation.WifiAP, 0, len(wl.Wifi)),
 		Cells: make([]geolocation.CellTower, 0, len(wl.Cells)),
@@ -387,8 +442,7 @@ func (s *Server) resolveAndPublishLBS(imei string, wl *protocol.WifiLBS) {
 		"latitude":      res.Latitude,
 		"longitude":     res.Longitude,
 	}
-	ts := wl.Time
-	s.publishLocation(imei, ts, values)
+	s.publishLocation(imei, wl.Time, values)
 	slog.Info("lbs_wifi location", "imei", imei,
 		"lat", res.Latitude, "lon", res.Longitude, "accuracy_m", res.Accuracy)
 }
@@ -424,6 +478,12 @@ func (s *Session) touch() {
 	s.mu.Unlock()
 }
 
+func (s *Session) tbConnectedLocked() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tbConnected
+}
+
 func (s *Server) ListSessions() []SessionInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -431,10 +491,11 @@ func (s *Server) ListSessions() []SessionInfo {
 	for _, sess := range s.sessions {
 		sess.mu.RLock()
 		out = append(out, SessionInfo{
-			IMEI:      sess.IMEI,
-			Remote:    sess.Remote,
-			Connected: sess.Connected,
-			LastSeen:  sess.LastSeen,
+			IMEI:        sess.IMEI,
+			Remote:      sess.Remote,
+			Connected:   sess.Connected,
+			LastSeen:    sess.LastSeen,
+			TBConnected: sess.tbConnected,
 		})
 		sess.mu.RUnlock()
 	}
