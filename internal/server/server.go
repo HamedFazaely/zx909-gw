@@ -229,7 +229,6 @@ func (s *Server) writeFrame(sc *SafeConn, remote, imei string, proto byte, paylo
 }
 
 // uplinkAllowed reports whether TB publish/connect is allowed for this IMEI.
-// Uses the registry cache; safe to call from the session goroutine.
 func (s *Server) uplinkAllowed(imei string) bool {
 	if imei == "" {
 		return false
@@ -242,9 +241,33 @@ func (s *Server) uplinkAllowed(imei string) bool {
 	return s.reg.IsRegistered(ctx, imei)
 }
 
-// publishLocation sends the unified location telemetry shape to ThingsBoard.
+// ensureTBConnected returns true if telemetry may be published.
+// On late claim (negative TTL expired → registered), connects the child device.
+func (s *Server) ensureTBConnected(imei string) bool {
+	if !s.uplinkAllowed(imei) {
+		return false
+	}
+	s.mu.RLock()
+	sess := s.sessions[imei]
+	s.mu.RUnlock()
+	if sess != nil && sess.tbConnectedLocked() {
+		return true
+	}
+	if err := s.tb.ConnectDevice(imei); err != nil {
+		slog.Warn("TB ConnectDevice failed", "imei", imei, "error", err)
+		return false
+	}
+	if sess != nil {
+		sess.mu.Lock()
+		sess.tbConnected = true
+		sess.mu.Unlock()
+	}
+	slog.Info("TB child connected", "imei", imei)
+	return true
+}
+
 func (s *Server) publishLocation(imei string, ts time.Time, values map[string]any) {
-	if imei == "" || !s.uplinkAllowed(imei) {
+	if imei == "" || !s.ensureTBConnected(imei) {
 		return
 	}
 	if ts.IsZero() {
@@ -256,7 +279,7 @@ func (s *Server) publishLocation(imei string, ts time.Time, values map[string]an
 }
 
 func (s *Server) publishTelemetry(imei string, ts time.Time, values map[string]any) {
-	if imei == "" || !s.uplinkAllowed(imei) {
+	if imei == "" || !s.ensureTBConnected(imei) {
 		return
 	}
 	if ts.IsZero() {
@@ -277,7 +300,6 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		*imei = id
 		*sess = s.registerSession(id, sc, remote)
 		slog.Info("login ok", "imei", id, "remote", remote)
-		// Must-reply first — never block the device on Paapeli/TB.
 		s.writeFrame(sc, remote, id, protocol.MsgLogin, protocol.BuildLoginACK(), "ACK")
 		go s.maybeConnectTB(*sess, id)
 
@@ -388,8 +410,6 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 	}
 }
 
-// maybeConnectTB runs after login ACK. If the IMEI is registered, announces the
-// child device to ThingsBoard. Safe to call concurrently.
 func (s *Server) maybeConnectTB(sess *Session, imei string) {
 	if sess == nil || imei == "" {
 		return
@@ -408,12 +428,7 @@ func (s *Server) maybeConnectTB(sess *Session, imei string) {
 	slog.Info("TB child connected", "imei", imei)
 }
 
-// resolveAndPublishLBS calls the geolocation API and publishes unified location
-// telemetry only on success. Runs in its own goroutine.
 func (s *Server) resolveAndPublishLBS(imei string, wl *protocol.WifiLBS) {
-	if !s.uplinkAllowed(imei) {
-		return
-	}
 	req := geolocation.Request{
 		Wifi:  make([]geolocation.WifiAP, 0, len(wl.Wifi)),
 		Cells: make([]geolocation.CellTower, 0, len(wl.Cells)),
@@ -502,8 +517,6 @@ func (s *Server) ListSessions() []SessionInfo {
 	return out
 }
 
-// SendToDevice implements command.SessionLookup.
-// Returns an error if the IMEI has no live TCP session.
 func (s *Server) SendToDevice(imei string, payload []byte) error {
 	s.mu.RLock()
 	sess, ok := s.sessions[imei]
