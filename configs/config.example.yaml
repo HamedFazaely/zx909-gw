@@ -26,5 +26,16 @@ geolocation:
   api_key: ""
   timeout: 3s
 
+# Claim-before-uplink: only registered IMEIs get TB connect/telemetry.
+# When enabled=false (default), every IMEI is treated as registered.
+paapeli:
+  enabled: false
+  base_url: "https://paapeli.example.com"
+  username: "tracker@gmail.com"
+  password: "gw_password"
+  timeout: 3s
+  positive_ttl: 30m   # cache when registered=true
+  negative_ttl: 60s   # cache when registered=false (short so claim is picked up)
+
 logging:
   level: info

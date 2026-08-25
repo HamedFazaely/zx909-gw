@@ -12,6 +12,7 @@ type Config struct {
 	Server      ServerConfig      `yaml:"server"`
 	ThingsBoard ThingsBoardConfig `yaml:"thingsboard"`
 	Geolocation GeolocationConfig `yaml:"geolocation"`
+	Paapeli     PaapeliConfig     `yaml:"paapeli"`
 	Logging     LoggingConfig     `yaml:"logging"`
 }
 
@@ -42,6 +43,17 @@ type GeolocationConfig struct {
 	URL     string        `yaml:"url"`
 	APIKey  string        `yaml:"api_key"`
 	Timeout time.Duration `yaml:"timeout"`
+}
+
+// PaapeliConfig controls claim-before-uplink registration checks.
+type PaapeliConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	BaseURL     string        `yaml:"base_url"`
+	Username    string        `yaml:"username"`
+	Password    string        `yaml:"password"`
+	Timeout     time.Duration `yaml:"timeout"`
+	PositiveTTL time.Duration `yaml:"positive_ttl"` // cache TTL when registered=true
+	NegativeTTL time.Duration `yaml:"negative_ttl"` // cache TTL when registered=false
 }
 
 type LoggingConfig struct {
@@ -85,6 +97,15 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Geolocation.Timeout == 0 {
 		cfg.Geolocation.Timeout = 3 * time.Second
+	}
+	if cfg.Paapeli.Timeout == 0 {
+		cfg.Paapeli.Timeout = 3 * time.Second
+	}
+	if cfg.Paapeli.PositiveTTL == 0 {
+		cfg.Paapeli.PositiveTTL = 30 * time.Minute
+	}
+	if cfg.Paapeli.NegativeTTL == 0 {
+		cfg.Paapeli.NegativeTTL = 60 * time.Second
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"

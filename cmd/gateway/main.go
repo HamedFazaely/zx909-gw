@@ -12,6 +12,7 @@ import (
 	"github.com/HamedFazaely/zx909-gw/internal/config"
 	"github.com/HamedFazaely/zx909-gw/internal/geolocation"
 	"github.com/HamedFazaely/zx909-gw/internal/mqtt"
+	"github.com/HamedFazaely/zx909-gw/internal/registry"
 	"github.com/HamedFazaely/zx909-gw/internal/server"
 )
 
@@ -33,10 +34,17 @@ func main() {
 		slog.Info("geolocation disabled (LBS/Wi-Fi will not publish location telemetry)")
 	}
 
+	reg := registry.New(cfg.Paapeli)
+	if reg.Enabled() {
+		slog.Info("paapeli registration checks enabled", "base_url", cfg.Paapeli.BaseURL)
+	} else {
+		slog.Info("paapeli registration checks disabled (all IMEIs allowed on TB uplink)")
+	}
+
 	var tb mqtt.Client
 	if cfg.ThingsBoard.UseMock {
 		tb = mqtt.NewMockClient()
-		slog.Info("MQTT mode: mock (device-protocol focus; no broker connection)")
+		slog.Info("MQTT mode: mock")
 	} else {
 		tb, err = mqtt.NewGatewayClient(cfg.ThingsBoard)
 		if err != nil {
@@ -46,13 +54,11 @@ func main() {
 		slog.Info("MQTT mode: real ThingsBoard Gateway API",
 			"broker", cfg.ThingsBoard.Host,
 			"port", cfg.ThingsBoard.Port,
-			"client_id", cfg.ThingsBoard.ClientID,
 		)
 	}
 
-	srv := server.New(cfg.Server, tb, geo)
+	srv := server.New(cfg.Server, tb, geo, reg)
 
-	// Single source of truth for device commands (debug REST + MQTT RPC).
 	cmdHandler := command.NewHandler(srv, slog.Default())
 	if gc, ok := tb.(*mqtt.GatewayClient); ok {
 		gc.SetRPCExecutor(cmdHandler)
