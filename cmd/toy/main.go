@@ -5,7 +5,6 @@ package main
 
 import (
 	"encoding/binary"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -45,16 +44,15 @@ func main() {
 	defer conn.Close()
 
 	dev := &toy{
-		conn:   conn,
-		serial: 0,
-		lat:    35.6892 + (rand.Float64()-0.5)*0.05,
-		lon:    51.3890 + (rand.Float64()-0.5)*0.05,
+		conn: conn,
+		lat:  35.6892 + (rand.Float64()-0.5)*0.05,
+		lon:  51.3890 + (rand.Float64()-0.5)*0.05,
 	}
 	log.Printf("connected to %s  IMEI=%s  lat=%.6f lon=%.6f", *addr, *imei, dev.lat, dev.lon)
 
 	go dev.readLoop()
 
-	if err := dev.send(dev.buildLogin(*imei)); err != nil {
+	if err := dev.sendFrame(protocol.MsgLogin, imeiToBCD(*imei)); err != nil {
 		log.Fatal(err)
 	}
 	log.Println("→ login 0x01")
@@ -90,24 +88,18 @@ func main() {
 	}
 }
 
-func (d *toy) nextSerial() uint16 {
+func (d *toy) sendFrame(proto byte, info []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.serial++
-	return d.serial
-}
-
-func (d *toy) send(pkt []byte) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	pkt := buildClassic(proto, info, d.serial)
 	_, err := d.conn.Write(pkt)
 	return err
 }
 
 func (d *toy) sendStatus() {
-	// terminal_info=0, voltage_level=6 (~100%), gsm=4, alarm=0, lang=1
 	info := []byte{0x00, 0x06, 0x04, 0x00, 0x01}
-	if err := d.send(buildClassic(protocol.MsgStatus, info, d.nextSerial())); err != nil {
+	if err := d.sendFrame(protocol.MsgStatus, info); err != nil {
 		log.Printf("status send: %v", err)
 		return
 	}
@@ -118,8 +110,7 @@ func (d *toy) sendGPS(speedKmh float64, heading uint16) {
 	d.mu.Lock()
 	lat, lon := d.lat, d.lon
 	d.mu.Unlock()
-	pkt := buildClassic(protocol.MsgGPSLBS, buildGPSBody(lat, lon, byte(speedKmh), heading), d.nextSerial())
-	if err := d.send(pkt); err != nil {
+	if err := d.sendFrame(protocol.MsgGPSLBS, buildGPSBody(lat, lon, byte(speedKmh), heading)); err != nil {
 		log.Printf("GPS send: %v", err)
 		return
 	}
@@ -127,7 +118,7 @@ func (d *toy) sendGPS(speedKmh float64, heading uint16) {
 }
 
 func (d *toy) replyString(text string) {
-	if err := d.send(buildClassic(protocol.MsgString, buildStringBody(text), d.nextSerial())); err != nil {
+	if err := d.sendFrame(protocol.MsgString, buildStringBody(text)); err != nil {
 		log.Printf("0x15 send: %v", err)
 		return
 	}
@@ -195,7 +186,6 @@ func (d *toy) handleDownlink(frame *protocol.Frame) {
 }
 
 func commandText(body []byte) string {
-	// 0x80 content: CMD_LEN | FLAG(4) | ASCII
 	if len(body) < 6 {
 		return ""
 	}
@@ -214,7 +204,6 @@ func commandText(body []byte) string {
 }
 
 func timerAck(cmd string) string {
-	// TIMER,T1,T2# → TIMER ACC ON:T1s,ACC OFF:T2s
 	inner := strings.TrimSuffix(strings.TrimPrefix(cmd, "TIMER,"), "#")
 	parts := strings.Split(inner, ",")
 	if len(parts) >= 2 {
@@ -239,8 +228,6 @@ func hbtAck(cmd string) string {
 }
 
 func buildClassic(proto byte, info []byte, serial uint16) []byte {
-	// 78 78 | LEN | PROTO | INFO | SERIAL | CRC | 0D 0A
-	// LEN = proto + info + serial + crc
 	packetLen := 1 + len(info) + 2 + 2
 	buf := make([]byte, 2+1+packetLen+2)
 	buf[0], buf[1] = 0x78, 0x78
@@ -255,37 +242,27 @@ func buildClassic(proto byte, info []byte, serial uint16) []byte {
 	return buf
 }
 
-func buildLogin(imei string) func() {} // placeholder to keep gofmt happy — replaced below
-
-func (d *toy) buildLogin(imei string) []byte {
-	return buildClassic(protocol.MsgLogin, imeiToBCD(imei), d.nextSerial())
-}
-
 func buildGPSBody(lat, lon float64, speedKmh byte, heading uint16) []byte {
 	now := time.Now().UTC()
-	body := make([]byte, 0, 26)
-	body = append(body,
-		byte(now.Year()-2000),
+	body := []byte{
+		byte(now.Year() - 2000),
 		byte(now.Month()),
 		byte(now.Day()),
 		byte(now.Hour()),
 		byte(now.Minute()),
 		byte(now.Second()),
-	)
-	body = append(body, 0xC8) // GPS info: 8 sats in low nibble, typical high nibble
+		0xC8,
+	}
 	var tmp [4]byte
 	binary.BigEndian.PutUint32(tmp[:], uint32(math.Abs(lat)*1_800_000))
 	body = append(body, tmp[:]...)
 	binary.BigEndian.PutUint32(tmp[:], uint32(math.Abs(lon)*1_800_000))
 	body = append(body, tmp[:]...)
 	body = append(body, speedKmh)
-	cs := heading & 0x03FF
-	cs |= 0x1000 // bit 12 often set on live 0x12 (North-ish / GPS valid family)
-	cs |= 0x0400 // observed live flags 0x0400
+	cs := heading&0x03FF | 0x1400
 	var csb [2]byte
 	binary.BigEndian.PutUint16(csb[:], cs)
 	body = append(body, csb[:]...)
-	// Minimal LBS tail copied from live 0x12 (body_len 26).
 	body = append(body, 0x01, 0xB0, 0x0B, 0xB0, 0x9F, 0x67, 0x09, 0x03)
 	return body
 }
@@ -297,7 +274,7 @@ func buildStringBody(text string) []byte {
 	out[0] = byte(cmdLen)
 	binary.BigEndian.PutUint32(out[1:5], protocol.ClassicServerFlag)
 	copy(out[5:5+len(msg)], msg)
-	binary.BigEndian.PutUint16(out[5+len(msg):], 1) // language = English
+	binary.BigEndian.PutUint16(out[5+len(msg):], 1)
 	return out
 }
 
