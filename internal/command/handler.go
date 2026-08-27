@@ -9,14 +9,12 @@ import (
 	"github.com/HamedFazaely/zx909-gw/internal/protocol"
 )
 
-// SessionLookup is implemented by the TCP server.
-// It returns an error if the device is currently offline.
 type SessionLookup interface {
 	SendToDevice(imei string, payload []byte) error
+	IsClassic(imei string) bool
+	NextCommandSerial(imei string) uint16
 }
 
-// Handler turns high-level commands (RPC or attribute changes)
-// into the binary packets the trackers understand.
 type Handler struct {
 	sessions SessionLookup
 	log      *slog.Logger
@@ -26,62 +24,84 @@ func NewHandler(sessions SessionLookup, log *slog.Logger) *Handler {
 	return &Handler{sessions: sessions, log: log}
 }
 
-// ExecuteRPC is the single entry point used by both the MQTT path
-// and the debug REST API.
-func (h *Handler) ExecuteRPC(ctx context.Context, imei, method string, params json.RawMessage) error {
-	var pkt []byte
+func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, error) {
+	classic := h.sessions.IsClassic(imei)
+	serial := uint16(1)
+	if classic {
+		serial = h.sessions.NextCommandSerial(imei)
+	}
 
 	switch method {
 	case "reboot":
-		pkt = protocol.BuildRestart()
+		if classic {
+			return protocol.BuildClassicRestart(serial), nil
+		}
+		return protocol.BuildRestart(), nil
 	case "shutdown":
-		pkt = protocol.BuildShutdown()
+		if classic {
+			return protocol.BuildClassicShutdown(serial), nil
+		}
+		return protocol.BuildShutdown(), nil
 	case "locate":
-		pkt = protocol.BuildLocate()
+		if classic {
+			return protocol.BuildClassicLocate(serial), nil
+		}
+		return protocol.BuildLocate(), nil
 	case "setLocationInterval":
 		var p struct {
 			Seconds int `json:"seconds"`
 		}
 		if err := json.Unmarshal(params, &p); err != nil {
-			return fmt.Errorf("invalid params for setLocationInterval: %w", err)
+			return nil, fmt.Errorf("invalid params for setLocationInterval: %w", err)
 		}
 		if p.Seconds < 10 || p.Seconds > 7200 {
-			return fmt.Errorf("seconds out of range (10-7200)")
+			return nil, fmt.Errorf("seconds out of range (10-7200)")
 		}
-		pkt = protocol.BuildUploadInterval(uint16(p.Seconds))
+		if classic {
+			return protocol.BuildClassicUploadInterval(uint16(p.Seconds), serial), nil
+		}
+		return protocol.BuildUploadInterval(uint16(p.Seconds)), nil
 	case "setStatusInterval":
 		var p struct {
 			Minutes int `json:"minutes"`
 		}
 		if err := json.Unmarshal(params, &p); err != nil {
-			return fmt.Errorf("invalid params for setStatusInterval: %w", err)
+			return nil, fmt.Errorf("invalid params for setStatusInterval: %w", err)
 		}
 		if p.Minutes < 1 || p.Minutes > 60 {
-			return fmt.Errorf("minutes out of range (1-60)")
+			return nil, fmt.Errorf("minutes out of range (1-60)")
 		}
-		pkt = protocol.BuildStatusInterval(p.Minutes)
+		if classic {
+			return protocol.BuildClassicStatusInterval(p.Minutes, serial), nil
+		}
+		return protocol.BuildStatusInterval(p.Minutes), nil
 	default:
-		return fmt.Errorf("unknown method %q", method)
+		return nil, fmt.Errorf("unknown method %q", method)
 	}
+}
 
-	h.log.Info("command", "imei", imei, "method", method)
+func (h *Handler) ExecuteRPC(ctx context.Context, imei, method string, params json.RawMessage) error {
+	pkt, err := h.packet(imei, method, params)
+	if err != nil {
+		return err
+	}
+	h.log.Info("command", "imei", imei, "method", method, "classic", h.sessions.IsClassic(imei), "hex", fmt.Sprintf("%x", pkt))
 	return h.sessions.SendToDevice(imei, pkt)
 }
 
-// ApplySharedAttributes applies durable configuration that arrived
-// as shared-attribute updates. Safe to call even if the device is offline
-// (the error is returned so the caller can decide).
 func (h *Handler) ApplySharedAttributes(ctx context.Context, imei string, attrs map[string]any) error {
 	if v, ok := attrs["locationIntervalSeconds"]; ok {
 		if sec, ok := toInt(v); ok && sec >= 10 && sec <= 7200 {
-			if err := h.sessions.SendToDevice(imei, protocol.BuildUploadInterval(uint16(sec))); err != nil {
+			params, _ := json.Marshal(map[string]int{"seconds": sec})
+			if err := h.ExecuteRPC(ctx, imei, "setLocationInterval", params); err != nil {
 				return err
 			}
 		}
 	}
 	if v, ok := attrs["statusIntervalMinutes"]; ok {
 		if min, ok := toInt(v); ok && min >= 1 && min <= 60 {
-			if err := h.sessions.SendToDevice(imei, protocol.BuildStatusInterval(min)); err != nil {
+			params, _ := json.Marshal(map[string]int{"minutes": min})
+			if err := h.ExecuteRPC(ctx, imei, "setStatusInterval", params); err != nil {
 				return err
 			}
 		}
