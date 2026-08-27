@@ -42,7 +42,6 @@ func NewSafeConn(c net.Conn) *SafeConn {
 	return &SafeConn{conn: c}
 }
 
-// WriteWithDeadline is the only supported way to send bytes on the connection.
 func (sc *SafeConn) WriteWithDeadline(b []byte, d time.Duration) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -69,19 +68,17 @@ func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 	return sc.conn.SetReadDeadline(t)
 }
 
-// Session is one live tracker TCP connection keyed by IMEI after login.
 type Session struct {
 	IMEI        string
 	Conn        *SafeConn
 	Remote      string
 	Connected   time.Time
 	LastSeen    time.Time
-	tbConnected bool // true after successful TB ConnectDevice for this session
-	Classic     bool // classic GT06 / Concox ACKs (length + serial + CRC)
+	tbConnected bool
+	Classic     bool
 	mu          sync.RWMutex
 }
 
-// SessionInfo is a snapshot for the debug API.
 type SessionInfo struct {
 	IMEI        string    `json:"imei"`
 	Remote      string    `json:"remote"`
@@ -98,13 +95,7 @@ func New(cfg config.ServerConfig, tb mqtt.Client, geo geolocation.Client, reg re
 	if reg == nil {
 		reg = registry.AllowAll{}
 	}
-	return &Server{
-		cfg:      cfg,
-		tb:       tb,
-		geo:      geo,
-		reg:      reg,
-		sessions: make(map[string]*Session),
-	}
+	return &Server{cfg: cfg, tb: tb, geo: geo, reg: reg, sessions: make(map[string]*Session)}
 }
 
 func (s *Server) ListenAndServe() error {
@@ -114,7 +105,6 @@ func (s *Server) ListenAndServe() error {
 	}
 	s.ln = ln
 	slog.Info("TCP listening", "addr", s.cfg.Listen)
-
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -145,16 +135,13 @@ func (s *Server) Shutdown() {
 func (s *Server) handleConn(sc *SafeConn) {
 	defer s.wg.Done()
 	defer sc.Close()
-
 	remote := sc.RemoteAddr().String()
 	slog.Info("tracker connected", "remote", remote)
-
 	var (
 		buf  []byte
 		imei string
 		sess *Session
 	)
-
 	defer func() {
 		if imei != "" {
 			s.removeSession(imei, sess)
@@ -166,7 +153,6 @@ func (s *Server) handleConn(sc *SafeConn) {
 			slog.Info("tracker disconnected (no login)", "remote", remote)
 		}
 	}()
-
 	tmp := make([]byte, 4096)
 	for {
 		_ = sc.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
@@ -189,12 +175,7 @@ func (s *Server) drainFrames(sc *SafeConn, remote string, buf []byte, imei *stri
 			break
 		}
 		if err != nil {
-			slog.Warn("frame error, resync",
-				"error", err,
-				"remote", remote,
-				"buf_hex", hex.EncodeToString(buf),
-				"consumed", consumed,
-			)
+			slog.Warn("frame error, resync", "error", err, "remote", remote, "buf_hex", hex.EncodeToString(buf), "consumed", consumed)
 			if consumed > 0 && consumed <= len(buf) {
 				buf = buf[consumed:]
 			} else if len(buf) > 0 {
@@ -203,17 +184,7 @@ func (s *Server) drainFrames(sc *SafeConn, remote string, buf []byte, imei *stri
 			continue
 		}
 		buf = buf[consumed:]
-
-		slog.Info("frame",
-			"remote", remote,
-			"imei", *imei,
-			"proto", protocol.ProtoHex(frame.Proto),
-			"classic", frame.Classic,
-			"serial", frame.Serial,
-			"body_len", len(frame.Body),
-			"raw", frame.Hex(),
-		)
-
+		slog.Info("frame", "remote", remote, "imei", *imei, "proto", protocol.ProtoHex(frame.Proto), "classic", frame.Classic, "serial", frame.Serial, "body_len", len(frame.Body), "raw", frame.Hex())
 		s.handleFrame(sc, remote, frame, imei, sess)
 	}
 	return buf
@@ -224,15 +195,9 @@ func (s *Server) writeFrame(sc *SafeConn, remote, imei string, proto byte, paylo
 		slog.Warn(kind+" write failed", "remote", remote, "imei", imei, "proto", protocol.ProtoHex(proto), "error", err)
 		return
 	}
-	slog.Info(kind,
-		"remote", remote,
-		"imei", imei,
-		"proto", protocol.ProtoHex(proto),
-		"hex", hex.EncodeToString(payload),
-	)
+	slog.Info(kind, "remote", remote, "imei", imei, "proto", protocol.ProtoHex(proto), "hex", hex.EncodeToString(payload))
 }
 
-// uplinkAllowed reports whether TB publish/connect is allowed for this IMEI.
 func (s *Server) uplinkAllowed(imei string) bool {
 	if imei == "" {
 		return false
@@ -245,8 +210,6 @@ func (s *Server) uplinkAllowed(imei string) bool {
 	return s.reg.IsRegistered(ctx, imei)
 }
 
-// ensureTBConnected returns true if telemetry may be published.
-// On late claim (negative TTL expired → registered), connects the child device.
 func (s *Server) ensureTBConnected(imei string) bool {
 	if !s.uplinkAllowed(imei) {
 		return false
@@ -314,7 +277,6 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 	if frame.Classic && *sess != nil {
 		markClassic(*sess)
 	}
-
 	switch frame.Proto {
 	case protocol.MsgLogin:
 		id, err := protocol.ParseLogin(frame.Body)
@@ -331,19 +293,15 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		slog.Info("login ok", "imei", id, "remote", remote, "classic", frame.Classic, "serial", frame.Serial)
 		s.replyLogin(sc, remote, id, frame)
 		go s.maybeConnectTB(*sess, id)
-
 	case protocol.MsgTimeSync:
 		if *sess != nil {
 			(*sess).touch()
 		}
 		if sessionClassic(*sess) || frame.Classic {
-			// Classic GT06 has no 0x30 handshake; ignore rather than send a 365GPS blob.
 			slog.Debug("skip Topin time-sync reply on classic session", "imei", *imei)
 			return
 		}
-		reply := protocol.BuildTimeSyncReply(time.Now())
-		s.writeFrame(sc, remote, *imei, protocol.MsgTimeSync, reply, "ACK")
-
+		s.writeFrame(sc, remote, *imei, protocol.MsgTimeSync, protocol.BuildTimeSyncReply(time.Now()), "ACK")
 	case protocol.MsgParam:
 		if *sess != nil {
 			(*sess).touch()
@@ -352,9 +310,7 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 			slog.Debug("skip Topin default-settings reply on classic session", "imei", *imei)
 			return
 		}
-		reply := protocol.BuildDefaultSettings()
-		s.writeFrame(sc, remote, *imei, protocol.MsgParam, reply, "ACK")
-
+		s.writeFrame(sc, remote, *imei, protocol.MsgParam, protocol.BuildDefaultSettings(), "ACK")
 	case protocol.MsgICCID:
 		if *sess != nil {
 			(*sess).touch()
@@ -366,25 +322,20 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 			slog.Info("iccid", "imei", *imei, "iccid", iccid)
 			s.publishTelemetry(*imei, time.Now().UTC(), map[string]any{"iccid": iccid})
 		}
-
 	case protocol.MsgStatus:
 		if *sess != nil {
 			(*sess).touch()
 		}
-		st, err := protocol.ParseStatus(frame.Body)
+		st, err := protocol.DecodeStatus(frame.Classic, frame.Body)
 		if err != nil {
 			slog.Debug("status parse failed", "imei", *imei, "error", err, "body", hex.EncodeToString(frame.Body))
 		} else {
-			slog.Info("status", "imei", *imei, "summary", st.String(),
-				"battery", st.BatteryPercent, "sw", st.SoftwareVer, "tz", st.Timezone)
-			if st.BatteryPercent >= 0 {
-				s.publishTelemetry(*imei, time.Now().UTC(), map[string]any{
-					"battery": st.BatteryPercent,
-				})
+			slog.Info("status", "imei", *imei, "summary", st.String(), "battery", st.BatteryPercent, "voltage_level", st.VoltageLevel, "gsm", st.GSMSignal)
+			if values := st.Telemetry(); len(values) > 0 {
+				s.publishTelemetry(*imei, time.Now().UTC(), values)
 			}
 		}
 		s.replyStatus(sc, remote, *imei, frame)
-
 	case protocol.MsgGPS, protocol.MsgGPSLBS, protocol.MsgGPS2, protocol.MsgGPSOffline, protocol.MsgAlarm:
 		if *imei == "" {
 			slog.Debug("GPS before login, ignoring", "remote", remote)
@@ -395,87 +346,56 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		}
 		pos, err := protocol.ParseGPS(frame.Body)
 		if err != nil {
-			slog.Debug("GPS parse failed", "imei", *imei, "error", err,
-				"body_len", len(frame.Body), "proto", protocol.ProtoHex(frame.Proto), "body", hex.EncodeToString(frame.Body))
+			slog.Debug("GPS parse failed", "imei", *imei, "error", err, "body_len", len(frame.Body), "proto", protocol.ProtoHex(frame.Proto), "body", hex.EncodeToString(frame.Body))
 		} else {
-			values := map[string]any{
-				"position_type": "gps",
-				"latitude":      pos.Latitude,
-				"longitude":     pos.Longitude,
-				"speed":         pos.SpeedKmh,
-				"course":        pos.Course,
-				"satellites":    pos.Satellites,
-				"valid":         pos.Valid,
-			}
+			values := map[string]any{"position_type": "gps", "latitude": pos.Latitude, "longitude": pos.Longitude, "speed": pos.SpeedKmh, "course": pos.Course, "satellites": pos.Satellites, "valid": pos.Valid}
 			s.publishLocation(*imei, pos.Time, values)
-			slog.Info("gps", "imei", *imei, "summary", pos.String(),
-				"lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh,
-				"course", pos.Course, "sats", pos.Satellites, "valid", pos.Valid)
+			slog.Info("gps", "imei", *imei, "summary", pos.String(), "lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh, "course", pos.Course, "sats", pos.Satellites, "valid", pos.Valid)
 		}
 		s.replyLocation(sc, remote, *imei, frame)
-
 	case protocol.MsgWifiLBS, protocol.MsgWifiLBS2, protocol.MsgOfflineWifi, protocol.MsgOnlineWifi:
 		if *sess != nil {
 			(*sess).touch()
 		}
 		wl, err := protocol.ParseWifiLBS(frame.Body)
 		if err != nil {
-			slog.Debug("wifi/lbs parse failed", "imei", *imei, "error", err,
-				"proto", protocol.ProtoHex(frame.Proto), "body", hex.EncodeToString(frame.Body))
+			slog.Debug("wifi/lbs parse failed", "imei", *imei, "error", err, "proto", protocol.ProtoHex(frame.Proto), "body", hex.EncodeToString(frame.Body))
 		} else {
-			slog.Info("wifi/lbs", "imei", *imei, "proto", protocol.ProtoHex(frame.Proto), "summary", wl.String(),
-				"wifi_count", len(wl.Wifi), "cell_count", len(wl.Cells))
+			slog.Info("wifi/lbs", "imei", *imei, "proto", protocol.ProtoHex(frame.Proto), "summary", wl.String(), "wifi_count", len(wl.Wifi), "cell_count", len(wl.Cells))
 			if *imei != "" && s.geo.Enabled() {
 				go s.resolveAndPublishLBS(*imei, wl)
 			}
 		}
 		s.replyLocation(sc, remote, *imei, frame)
-
 	default:
 		if *sess != nil {
 			(*sess).touch()
 		}
-		slog.Info("unhandled",
-			"proto", protocol.ProtoHex(frame.Proto),
-			"imei", *imei,
-			"remote", remote,
-			"classic", frame.Classic,
-			"serial", frame.Serial,
-			"body_len", len(frame.Body),
-			"body", hex.EncodeToString(frame.Body),
-			"raw", frame.Hex(),
-		)
+		slog.Info("unhandled", "proto", protocol.ProtoHex(frame.Proto), "imei", *imei, "remote", remote, "classic", frame.Classic, "serial", frame.Serial, "body_len", len(frame.Body), "body", hex.EncodeToString(frame.Body), "raw", frame.Hex())
 	}
 }
 
 func (s *Server) replyLogin(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
-	var payload []byte
+	payload := protocol.BuildLoginACK()
 	if frame.Classic {
 		payload = protocol.BuildACK(protocol.MsgLogin, frame.Serial)
-	} else {
-		payload = protocol.BuildLoginACK()
 	}
 	s.writeFrame(sc, remote, imei, protocol.MsgLogin, payload, "ACK")
 }
 
 func (s *Server) replyStatus(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
-	var payload []byte
+	payload := protocol.BuildStatusEcho(frame.Raw)
 	if frame.Classic {
 		payload = protocol.BuildACK(protocol.MsgStatus, frame.Serial)
-	} else {
-		payload = protocol.BuildStatusEcho(frame.Raw)
 	}
 	s.writeFrame(sc, remote, imei, protocol.MsgStatus, payload, "ACK")
 }
 
 func (s *Server) replyLocation(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
 	if frame.Classic {
-		// PDF: location (0x12) / alarm (0x16) do not require a server reply.
-		// Sending the 365GPS datetime echo would look like garbage to Concox firmware.
 		return
 	}
-	dt := protocol.DatetimeFromBody(frame.Body)
-	s.writeFrame(sc, remote, imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
+	s.writeFrame(sc, remote, imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, protocol.DatetimeFromBody(frame.Body)), "ACK")
 }
 
 func (s *Server) maybeConnectTB(sess *Session, imei string) {
@@ -497,37 +417,22 @@ func (s *Server) maybeConnectTB(sess *Session, imei string) {
 }
 
 func (s *Server) resolveAndPublishLBS(imei string, wl *protocol.WifiLBS) {
-	req := geolocation.Request{
-		Wifi:  make([]geolocation.WifiAP, 0, len(wl.Wifi)),
-		Cells: make([]geolocation.CellTower, 0, len(wl.Cells)),
-	}
+	req := geolocation.Request{Wifi: make([]geolocation.WifiAP, 0, len(wl.Wifi)), Cells: make([]geolocation.CellTower, 0, len(wl.Cells))}
 	for _, w := range wl.Wifi {
 		req.Wifi = append(req.Wifi, geolocation.WifiAP{MAC: w.MAC, RSSI: w.RSSI})
 	}
 	for _, c := range wl.Cells {
-		req.Cells = append(req.Cells, geolocation.CellTower{
-			MCC: c.MCC, MNC: c.MNC, LAC: c.LAC, CellID: c.CellID, Signal: c.Signal,
-		})
+		req.Cells = append(req.Cells, geolocation.CellTower{MCC: c.MCC, MNC: c.MNC, LAC: c.LAC, CellID: c.CellID, Signal: c.Signal})
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	res, err := s.geo.Locate(ctx, req)
 	if err != nil {
-		slog.Debug("geolocation failed", "imei", imei, "error", err,
-			"wifi", len(req.Wifi), "cells", len(req.Cells))
+		slog.Debug("geolocation failed", "imei", imei, "error", err, "wifi", len(req.Wifi), "cells", len(req.Cells))
 		return
 	}
-
-	values := map[string]any{
-		"position_type": "lbs_wifi",
-		"latitude":      res.Latitude,
-		"longitude":     res.Longitude,
-	}
-	s.publishLocation(imei, wl.Time, values)
-	slog.Info("lbs_wifi location", "imei", imei,
-		"lat", res.Latitude, "lon", res.Longitude, "accuracy_m", res.Accuracy)
+	s.publishLocation(imei, wl.Time, map[string]any{"position_type": "lbs_wifi", "latitude": res.Latitude, "longitude": res.Longitude})
+	slog.Info("lbs_wifi location", "imei", imei, "lat", res.Latitude, "lon", res.Longitude, "accuracy_m", res.Accuracy)
 }
 
 func (s *Server) registerSession(imei string, sc *SafeConn, remote string) *Session {
@@ -536,13 +441,7 @@ func (s *Server) registerSession(imei string, sc *SafeConn, remote string) *Sess
 	if old, ok := s.sessions[imei]; ok && old.Conn != sc {
 		_ = old.Conn.Close()
 	}
-	sess := &Session{
-		IMEI:      imei,
-		Conn:      sc,
-		Remote:    remote,
-		Connected: time.Now(),
-		LastSeen:  time.Now(),
-	}
+	sess := &Session{IMEI: imei, Conn: sc, Remote: remote, Connected: time.Now(), LastSeen: time.Now()}
 	s.sessions[imei] = sess
 	return sess
 }
@@ -573,14 +472,7 @@ func (s *Server) ListSessions() []SessionInfo {
 	out := make([]SessionInfo, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		sess.mu.RLock()
-		out = append(out, SessionInfo{
-			IMEI:        sess.IMEI,
-			Remote:      sess.Remote,
-			Connected:   sess.Connected,
-			LastSeen:    sess.LastSeen,
-			TBConnected: sess.tbConnected,
-			Classic:     sess.Classic,
-		})
+		out = append(out, SessionInfo{IMEI: sess.IMEI, Remote: sess.Remote, Connected: sess.Connected, LastSeen: sess.LastSeen, TBConnected: sess.tbConnected, Classic: sess.Classic})
 		sess.mu.RUnlock()
 	}
 	return out
