@@ -9,9 +9,6 @@ import (
 )
 
 func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame, imei *string, sess **Session) {
-	if frame.Classic && *sess != nil {
-		markClassic(*sess)
-	}
 	switch frame.Proto {
 	case protocol.MsgLogin:
 		id, err := protocol.ParseLogin(frame.Body)
@@ -22,30 +19,14 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		}
 		*imei = id
 		*sess = s.registerSession(id, sc, remote)
-		if frame.Classic {
-			markClassic(*sess)
-		}
-		slog.Info("login ok", "imei", id, "remote", remote, "classic", frame.Classic, "serial", frame.Serial)
+		slog.Info("login ok", "imei", id, "remote", remote, "serial", frame.Serial)
 		s.replyLogin(sc, remote, id, frame)
 		go s.maybeConnectTB(*sess, id)
-	case protocol.MsgTimeSync:
+	case protocol.MsgTimeSync, protocol.MsgParam:
+		// Topin handshake packets — ignore on this product.
 		if *sess != nil {
 			(*sess).touch()
 		}
-		if sessionClassic(*sess) || frame.Classic {
-			slog.Debug("skip Topin time-sync reply on classic session", "imei", *imei)
-			return
-		}
-		s.writeFrame(sc, remote, *imei, protocol.MsgTimeSync, protocol.BuildTimeSyncReply(time.Now()), "ACK")
-	case protocol.MsgParam:
-		if *sess != nil {
-			(*sess).touch()
-		}
-		if sessionClassic(*sess) || frame.Classic {
-			slog.Debug("skip Topin default-settings reply on classic session", "imei", *imei)
-			return
-		}
-		s.writeFrame(sc, remote, *imei, protocol.MsgParam, protocol.BuildDefaultSettings(), "ACK")
 	case protocol.MsgICCID:
 		if *sess != nil {
 			(*sess).touch()
@@ -61,7 +42,7 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 		if *sess != nil {
 			(*sess).touch()
 		}
-		st, err := protocol.DecodeStatus(frame.Classic, frame.Body)
+		st, err := protocol.ParseClassicStatus(frame.Body)
 		if err != nil {
 			slog.Debug("status parse failed", "imei", *imei, "error", err, "body", hex.EncodeToString(frame.Body))
 		} else {
@@ -87,7 +68,7 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 			s.publishLocation(*imei, pos.Time, values)
 			slog.Info("gps", "imei", *imei, "summary", pos.String(), "lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh, "course", pos.Course, "sats", pos.Satellites, "valid", pos.Valid)
 		}
-		s.replyLocation(sc, remote, *imei, frame)
+		// Classic GT06: no ACK for 0x12 / 0x16.
 	case protocol.MsgWifiLBS, protocol.MsgWifiLBS2, protocol.MsgOfflineWifi, protocol.MsgOnlineWifi:
 		if *sess != nil {
 			(*sess).touch()
@@ -101,13 +82,12 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 				go s.resolveAndPublishLBS(*imei, wl)
 			}
 		}
-		s.replyLocation(sc, remote, *imei, frame)
 	case protocol.MsgString:
 		s.handleStringInfo(*imei, *sess, frame)
 	default:
 		if *sess != nil {
 			(*sess).touch()
 		}
-		slog.Info("unhandled", "proto", protocol.ProtoHex(frame.Proto), "imei", *imei, "remote", remote, "classic", frame.Classic, "serial", frame.Serial, "body_len", len(frame.Body), "body", hex.EncodeToString(frame.Body), "raw", frame.Hex())
+		slog.Info("unhandled", "proto", protocol.ProtoHex(frame.Proto), "imei", *imei, "remote", remote, "serial", frame.Serial, "body_len", len(frame.Body), "body", hex.EncodeToString(frame.Body), "raw", frame.Hex())
 	}
 }

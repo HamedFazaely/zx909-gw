@@ -75,7 +75,6 @@ type Session struct {
 	Connected   time.Time
 	LastSeen    time.Time
 	tbConnected bool
-	Classic     bool
 	mu          sync.RWMutex
 }
 
@@ -85,7 +84,6 @@ type SessionInfo struct {
 	Connected   time.Time `json:"connected"`
 	LastSeen    time.Time `json:"last_seen"`
 	TBConnected bool      `json:"tb_connected"`
-	Classic     bool      `json:"classic"`
 }
 
 func New(cfg config.ServerConfig, tb mqtt.Client, geo geolocation.Client, reg registry.Registry) *Server {
@@ -184,7 +182,7 @@ func (s *Server) drainFrames(sc *SafeConn, remote string, buf []byte, imei *stri
 			continue
 		}
 		buf = buf[consumed:]
-		slog.Info("frame", "remote", remote, "imei", *imei, "proto", protocol.ProtoHex(frame.Proto), "classic", frame.Classic, "serial", frame.Serial, "body_len", len(frame.Body), "raw", frame.Hex())
+		slog.Info("frame", "remote", remote, "imei", *imei, "proto", protocol.ProtoHex(frame.Proto), "serial", frame.Serial, "body_len", len(frame.Body), "raw", frame.Hex())
 		s.handleFrame(sc, remote, frame, imei, sess)
 	}
 	return buf
@@ -255,45 +253,12 @@ func (s *Server) publishTelemetry(imei string, ts time.Time, values map[string]a
 	_ = s.tb.PublishTelemetry(imei, ts, values)
 }
 
-func sessionClassic(sess *Session) bool {
-	if sess == nil {
-		return false
-	}
-	sess.mu.RLock()
-	defer sess.mu.RUnlock()
-	return sess.Classic
-}
-
-func markClassic(sess *Session) {
-	if sess == nil {
-		return
-	}
-	sess.mu.Lock()
-	sess.Classic = true
-	sess.mu.Unlock()
-}
-
 func (s *Server) replyLogin(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
-	payload := protocol.BuildLoginACK()
-	if frame.Classic {
-		payload = protocol.BuildACK(protocol.MsgLogin, frame.Serial)
-	}
-	s.writeFrame(sc, remote, imei, protocol.MsgLogin, payload, "ACK")
+	s.writeFrame(sc, remote, imei, protocol.MsgLogin, protocol.BuildACK(protocol.MsgLogin, frame.Serial), "ACK")
 }
 
 func (s *Server) replyStatus(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
-	payload := protocol.BuildStatusEcho(frame.Raw)
-	if frame.Classic {
-		payload = protocol.BuildACK(protocol.MsgStatus, frame.Serial)
-	}
-	s.writeFrame(sc, remote, imei, protocol.MsgStatus, payload, "ACK")
-}
-
-func (s *Server) replyLocation(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
-	if frame.Classic {
-		return
-	}
-	s.writeFrame(sc, remote, imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, protocol.DatetimeFromBody(frame.Body)), "ACK")
+	s.writeFrame(sc, remote, imei, protocol.MsgStatus, protocol.BuildACK(protocol.MsgStatus, frame.Serial), "ACK")
 }
 
 func (s *Server) maybeConnectTB(sess *Session, imei string) {
@@ -370,7 +335,7 @@ func (s *Server) ListSessions() []SessionInfo {
 	out := make([]SessionInfo, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		sess.mu.RLock()
-		out = append(out, SessionInfo{IMEI: sess.IMEI, Remote: sess.Remote, Connected: sess.Connected, LastSeen: sess.LastSeen, TBConnected: sess.tbConnected, Classic: sess.Classic})
+		out = append(out, SessionInfo{IMEI: sess.IMEI, Remote: sess.Remote, Connected: sess.Connected, LastSeen: sess.LastSeen, TBConnected: sess.tbConnected})
 		sess.mu.RUnlock()
 	}
 	return out

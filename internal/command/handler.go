@@ -13,7 +13,6 @@ import (
 
 type SessionLookup interface {
 	SendToDevice(imei string, payload []byte) error
-	IsClassic(imei string) bool
 	NextCommandSerial(imei string) uint16
 }
 
@@ -27,37 +26,18 @@ func NewHandler(sessions SessionLookup, log *slog.Logger) *Handler {
 }
 
 func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, error) {
-	classic := h.sessions.IsClassic(imei)
-	serial := uint16(1)
-	if classic {
-		serial = h.sessions.NextCommandSerial(imei)
-	}
+	serial := h.sessions.NextCommandSerial(imei)
 
 	switch method {
 	case "reboot":
-		if classic {
-			return protocol.BuildClassicRestart(serial), nil
-		}
-		return protocol.BuildRestart(), nil
+		return protocol.BuildClassicRestart(serial), nil
 	case "shutdown":
-		if classic {
-			return protocol.BuildClassicShutdown(serial), nil
-		}
-		return protocol.BuildShutdown(), nil
+		return protocol.BuildClassicShutdown(serial), nil
 	case "locate":
-		if classic {
-			return protocol.BuildClassicLocate(serial), nil
-		}
-		return protocol.BuildLocate(), nil
+		return protocol.BuildClassicLocate(serial), nil
 	case "findOn":
-		if !classic {
-			return nil, fmt.Errorf("findOn is classic GT06 only")
-		}
 		return protocol.BuildClassicFind(true, serial), nil
 	case "findOff":
-		if !classic {
-			return nil, fmt.Errorf("findOff is classic GT06 only")
-		}
 		return protocol.BuildClassicFind(false, serial), nil
 	case "send":
 		var p struct {
@@ -74,9 +54,6 @@ func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, e
 			if r < 0x20 || r > 0x7E || !unicode.IsPrint(r) {
 				return nil, fmt.Errorf("text must be printable ASCII")
 			}
-		}
-		if !classic {
-			return nil, fmt.Errorf("raw ASCII send is only supported on classic GT06 sessions")
 		}
 		return protocol.BuildClassicCommand(text, serial), nil
 	case "setLocationInterval":
@@ -97,13 +74,7 @@ func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, e
 		if idle < 5 || idle > 18000 {
 			return nil, fmt.Errorf("idle_seconds out of range (5-18000)")
 		}
-		if classic {
-			return protocol.BuildClassicTimer(p.Seconds, idle, serial), nil
-		}
-		if p.Seconds < 10 || p.Seconds > 7200 {
-			return nil, fmt.Errorf("seconds out of range (10-7200)")
-		}
-		return protocol.BuildUploadInterval(uint16(p.Seconds)), nil
+		return protocol.BuildClassicTimer(p.Seconds, idle, serial), nil
 	case "setStatusInterval":
 		var p struct {
 			Seconds     int `json:"seconds"`
@@ -127,13 +98,7 @@ func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, e
 		if idle < 60 || idle > 18000 {
 			return nil, fmt.Errorf("heartbeat idle_seconds out of range (60-18000)")
 		}
-		if classic {
-			return protocol.BuildClassicHeartbeat(on, idle, serial), nil
-		}
-		if p.Minutes < 1 || p.Minutes > 60 {
-			return nil, fmt.Errorf("minutes out of range (1-60)")
-		}
-		return protocol.BuildStatusInterval(p.Minutes), nil
+		return protocol.BuildClassicHeartbeat(on, idle, serial), nil
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
 	}
@@ -144,7 +109,7 @@ func (h *Handler) ExecuteRPC(ctx context.Context, imei, method string, params js
 	if err != nil {
 		return err
 	}
-	h.log.Info("command", "imei", imei, "method", method, "classic", h.sessions.IsClassic(imei), "hex", fmt.Sprintf("%x", pkt))
+	h.log.Info("command", "imei", imei, "method", method, "hex", fmt.Sprintf("%x", pkt))
 	return h.sessions.SendToDevice(imei, pkt)
 }
 
