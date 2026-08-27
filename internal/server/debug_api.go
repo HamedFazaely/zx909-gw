@@ -57,9 +57,11 @@ func (d *DebugAPI) shutdown(w http.ResponseWriter, r *http.Request) {
 }
 
 type intervalReq struct {
-	LocationSeconds *uint16 `json:"location_seconds"`
-	IdleSeconds     *uint16 `json:"idle_seconds"`
-	StatusMinutes   *uint8  `json:"status_minutes"`
+	LocationSeconds  *uint16 `json:"location_seconds"`
+	IdleSeconds      *uint16 `json:"idle_seconds"`
+	HeartbeatSeconds *uint16 `json:"heartbeat_seconds"`
+	HeartbeatIdle    *uint16 `json:"heartbeat_idle_seconds"`
+	StatusMinutes    *uint8  `json:"status_minutes"`
 }
 
 func (d *DebugAPI) interval(w http.ResponseWriter, r *http.Request) {
@@ -69,8 +71,9 @@ func (d *DebugAPI) interval(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON: " + err.Error()})
 		return
 	}
-	if req.LocationSeconds == nil && req.IdleSeconds == nil && req.StatusMinutes == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provide location_seconds, idle_seconds, and/or status_minutes"})
+	if req.LocationSeconds == nil && req.IdleSeconds == nil &&
+		req.HeartbeatSeconds == nil && req.HeartbeatIdle == nil && req.StatusMinutes == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provide location_seconds, idle_seconds, heartbeat_seconds, and/or status_minutes"})
 		return
 	}
 
@@ -93,13 +96,25 @@ func (d *DebugAPI) interval(w http.ResponseWriter, r *http.Request) {
 		sent["location_seconds"] = on
 		sent["idle_seconds"] = idle
 	}
-	if req.StatusMinutes != nil {
-		params, _ := json.Marshal(map[string]int{"minutes": int(*req.StatusMinutes)})
+	if req.HeartbeatSeconds != nil || req.HeartbeatIdle != nil || req.StatusMinutes != nil {
+		on := 180
+		if req.StatusMinutes != nil {
+			on = int(*req.StatusMinutes) * 60
+		}
+		if req.HeartbeatSeconds != nil {
+			on = int(*req.HeartbeatSeconds)
+		}
+		idle := on
+		if req.HeartbeatIdle != nil {
+			idle = int(*req.HeartbeatIdle)
+		}
+		params, _ := json.Marshal(map[string]int{"seconds": on, "idle_seconds": idle})
 		if err := d.handler.ExecuteRPC(r.Context(), imei, "setStatusInterval", params); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 			return
 		}
-		sent["status_minutes"] = *req.StatusMinutes
+		sent["heartbeat_seconds"] = on
+		sent["heartbeat_idle_seconds"] = idle
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imei": imei, "sent": sent})

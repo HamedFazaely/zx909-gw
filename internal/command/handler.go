@@ -106,16 +106,32 @@ func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, e
 		return protocol.BuildUploadInterval(uint16(p.Seconds)), nil
 	case "setStatusInterval":
 		var p struct {
-			Minutes int `json:"minutes"`
+			Seconds     int `json:"seconds"`
+			IdleSeconds int `json:"idle_seconds"`
+			Minutes     int `json:"minutes"`
 		}
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params for setStatusInterval: %w", err)
 		}
-		if p.Minutes < 1 || p.Minutes > 60 {
-			return nil, fmt.Errorf("minutes out of range (1-60)")
+		on := p.Seconds
+		if on == 0 && p.Minutes > 0 {
+			on = p.Minutes * 60
+		}
+		if on < 60 || on > 18000 {
+			return nil, fmt.Errorf("heartbeat seconds out of range (60-18000)")
+		}
+		idle := p.IdleSeconds
+		if idle == 0 {
+			idle = on
+		}
+		if idle < 60 || idle > 18000 {
+			return nil, fmt.Errorf("heartbeat idle_seconds out of range (60-18000)")
 		}
 		if classic {
-			return protocol.BuildClassicStatusInterval(p.Minutes, serial), nil
+			return protocol.BuildClassicHeartbeat(on, idle, serial), nil
+		}
+		if p.Minutes < 1 || p.Minutes > 60 {
+			return nil, fmt.Errorf("minutes out of range (1-60)")
 		}
 		return protocol.BuildStatusInterval(p.Minutes), nil
 	default:

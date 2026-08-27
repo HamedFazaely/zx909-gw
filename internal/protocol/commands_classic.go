@@ -61,21 +61,36 @@ func clampTimerSec(sec int) int {
 	return sec
 }
 
-// BuildClassicTimer is TIMER,T1,T2# — ACC ON / ACC OFF seconds.
-// Confirmed on 868022030668730: TIMER,60,180# → "TIMER ACC ON:60s,ACC OFF:180s".
+func clampHBTSec(sec int) int {
+	if sec < 60 {
+		return 60
+	}
+	if sec > 18000 {
+		return 18000
+	}
+	return sec
+}
+
+// BuildClassicTimer is TIMER,T1,T2# — ACC ON / ACC OFF GPS upload seconds.
+// Confirmed: TIMER,60,180# → "TIMER ACC ON:60s,ACC OFF:180s".
 func BuildClassicTimer(accOnSec, accOffSec int, serial uint16) []byte {
-	accOnSec = clampTimerSec(accOnSec)
-	accOffSec = clampTimerSec(accOffSec)
-	return BuildClassicCommand(fmt.Sprintf("TIMER,%d,%d#", accOnSec, accOffSec), serial)
+	return BuildClassicCommand(fmt.Sprintf("TIMER,%d,%d#", clampTimerSec(accOnSec), clampTimerSec(accOffSec)), serial)
 }
 
 func BuildClassicUploadInterval(seconds uint16, serial uint16) []byte {
 	return BuildClassicTimer(int(seconds), int(seconds), serial)
 }
 
+// BuildClassicHeartbeat is HBT,T1,T2# — ACC ON / ACC OFF heartbeat seconds.
+// Confirmed: HBT,180,180# → "HBT ACC ON:180s,ACC OFF:180s".
+func BuildClassicHeartbeat(accOnSec, accOffSec int, serial uint16) []byte {
+	return BuildClassicCommand(fmt.Sprintf("HBT,%d,%d#", clampHBTSec(accOnSec), clampHBTSec(accOffSec)), serial)
+}
+
 func BuildClassicStatusInterval(minutes int, serial uint16) []byte {
 	if minutes < 1 {
 		minutes = 1
 	}
-	return BuildClassicCommand(fmt.Sprintf("HBT,%d#", minutes*60), serial)
+	sec := minutes * 60
+	return BuildClassicHeartbeat(sec, sec, serial)
 }

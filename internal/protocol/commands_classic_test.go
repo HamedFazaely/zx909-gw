@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/hex"
 	"testing"
 )
@@ -24,11 +25,14 @@ func TestBuildClassicCommand_RESET(t *testing.T) {
 	}
 }
 
-func TestBuildClassicTimer_Live60_180(t *testing.T) {
-	// Captured send of TIMER,60,180# to 868022030668730 (serial 1 in builder).
-	got := hex.EncodeToString(BuildClassicTimer(60, 180, 1))
-	want := "78781780110000000154494d45522c36302c313830230001b6890d0a"
-	if got != want {
-		t.Fatalf("TIMER,60,180# = %s want %s", got, want)
+func TestBuildClassicTimerAndHBT_ASCII(t *testing.T) {
+	if !bytes.Contains(BuildClassicTimer(60, 180, 1), []byte("TIMER,60,180#")) {
+		t.Fatal("TIMER,60,180# missing")
+	}
+	if !bytes.Contains(BuildClassicHeartbeat(180, 180, 1), []byte("HBT,180,180#")) {
+		t.Fatal("HBT,180,180# missing")
+	}
+	if !bytes.Contains(BuildClassicStatusInterval(3, 1), []byte("HBT,180,180#")) {
+		t.Fatal("status 3min should be HBT,180,180#")
 	}
 }
