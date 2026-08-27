@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
+	"unicode"
 
 	"github.com/HamedFazaely/zx909-gw/internal/protocol"
 )
@@ -47,6 +49,26 @@ func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, e
 			return protocol.BuildClassicLocate(serial), nil
 		}
 		return protocol.BuildLocate(), nil
+	case "send":
+		var p struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params for send: %w", err)
+		}
+		text := strings.TrimSpace(p.Text)
+		if text == "" || len(text) > 80 {
+			return nil, fmt.Errorf("text must be 1-80 characters")
+		}
+		for _, r := range text {
+			if r < 0x20 || r > 0x7E || !unicode.IsPrint(r) {
+				return nil, fmt.Errorf("text must be printable ASCII")
+			}
+		}
+		if !classic {
+			return nil, fmt.Errorf("raw ASCII send is only supported on classic GT06 sessions")
+		}
+		return protocol.BuildClassicCommand(text, serial), nil
 	case "setLocationInterval":
 		var p struct {
 			Seconds int `json:"seconds"`
@@ -116,7 +138,7 @@ func toInt(v any) (int, bool) {
 	case int:
 		return n, true
 	case int64:
-		return int(n), true
+		return n, true
 	case json.Number:
 		i, err := n.Int64()
 		return int(i), err == nil

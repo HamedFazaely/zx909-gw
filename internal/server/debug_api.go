@@ -10,9 +10,6 @@ import (
 	"github.com/HamedFazaely/zx909-gw/internal/command"
 )
 
-// DebugAPI is a localhost-oriented HTTP surface for injecting downlink
-// commands while reverse-engineering the device protocol. Not for production
-// exposure without auth.
 type DebugAPI struct {
 	srv     *Server
 	handler *command.Handler
@@ -29,6 +26,7 @@ func (d *DebugAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /devices/{imei}/shutdown", d.shutdown)
 	mux.HandleFunc("POST /devices/{imei}/interval", d.interval)
 	mux.HandleFunc("POST /devices/{imei}/locate", d.locate)
+	mux.HandleFunc("POST /devices/{imei}/command", d.command)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ts": time.Now().UTC()})
 	})
@@ -105,13 +103,29 @@ func (d *DebugAPI) locate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imei": imei, "cmd": "locate"})
 }
 
+func (d *DebugAPI) command(w http.ResponseWriter, r *http.Request) {
+	imei := r.PathValue("imei")
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	params, _ := json.Marshal(map[string]string{"text": req.Text})
+	if err := d.handler.ExecuteRPC(r.Context(), imei, "send", params); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imei": imei, "cmd": "send", "text": req.Text})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// ListenAndServeDebug starts the debug HTTP server. Blocks until error.
 func ListenAndServeDebug(addr string, srv *Server, handler *command.Handler) error {
 	api := NewDebugAPI(srv, handler)
 	slog.Info("debug REST listening", "addr", addr,
@@ -121,6 +135,7 @@ func ListenAndServeDebug(addr string, srv *Server, handler *command.Handler) err
 			"POST /devices/{imei}/shutdown",
 			"POST /devices/{imei}/interval",
 			"POST /devices/{imei}/locate",
+			"POST /devices/{imei}/command",
 		}, ", "))
 	return http.ListenAndServe(addr, api.Handler())
 }

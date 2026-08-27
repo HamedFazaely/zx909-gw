@@ -42,6 +42,9 @@ func BuildClassicRestart(serial uint16) []byte {
 	return BuildClassicCommand("RESET#", serial)
 }
 
+// BuildClassicShutdown sends POWEROFF#, the 365GPS 4G verb.
+// IMEI 868022030668730 ignored it over 0x80 (no 0x15). Many classic
+// Concox vehicle units have no remote power-off at all — only RESET#.
 func BuildClassicShutdown(serial uint16) []byte {
 	return BuildClassicCommand("POWEROFF#", serial)
 }
