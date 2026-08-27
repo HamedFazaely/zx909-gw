@@ -38,14 +38,16 @@ const (
 	MsgOnlineWifi  byte = 0x69
 	MsgRestart     byte = 0x48
 	MsgUploadInt   byte = 0x97
+	MsgAlarm       byte = 0x16
 )
 
 // Frame is a decoded packet.
 type Frame struct {
-	Proto  byte
-	Body   []byte
-	Serial uint16
-	Raw    []byte
+	Proto   byte
+	Body    []byte
+	Serial  uint16
+	Raw     []byte
+	Classic bool // true when length+CRC match classic GT06 / Concox
 }
 
 // ExtractFrame pulls one complete frame from buf.
@@ -54,7 +56,10 @@ type Frame struct {
 //   - Login, status, GPS, time-sync: only accept trailer after a known minimum content length.
 //   - Wi-Fi/LBS: walk datetime + optional LBS cell block when present; otherwise trailer after datetime.
 //   - Unknown protos: legacy first-0D0A-after-header behaviour.
+//
 // Length bytes are not trusted (Topin often sends dummies).
+// After a successful extract, promoteClassic upgrades frames whose length byte
+// and CRC-ITU match classic GT06.
 func ExtractFrame(buf []byte) (*Frame, int, error) {
 	if len(buf) < 5 {
 		return nil, 0, ErrIncomplete
@@ -140,12 +145,12 @@ func ExtractFrame(buf []byte) (*Frame, int, error) {
 func contentBounds(proto byte, content []byte) (min int, exact int, known bool) {
 	switch proto {
 	case MsgLogin:
-		return 9, -1, true // IMEI(8) + software version(1)
+		return 8, -1, true // IMEI(8); classic GT06 then serial+CRC, Topin may add a version byte
 	case MsgTimeSync:
 		return 0, -1, true // request is empty content; reply is handled as S→C
 	case MsgStatus:
 		return 4, -1, true // battery, sw, tz, interval (+ optional signal)
-	case MsgGPS, MsgGPSOffline, MsgGPSLBS, MsgGPS2:
+	case MsgGPS, MsgGPSOffline, MsgGPSLBS, MsgGPS2, MsgAlarm:
 		return 18, -1, true // DT(6)+info(1)+lat(4)+lon(4)+speed(1)+course(2); altitude optional after
 	case MsgWifiLBS, MsgWifiLBS2, MsgOfflineWifi, MsgOnlineWifi:
 		return wifiLBSContentBounds(content)
@@ -231,12 +236,14 @@ func frameFromRaw(raw []byte, header uint16) (*Frame, int, error) {
 	default:
 		return nil, end, ErrBadHeader
 	}
-	return &Frame{
+	f := &Frame{
 		Proto:  proto,
 		Body:   body,
 		Serial: serial,
 		Raw:    append([]byte(nil), raw...),
-	}, end, nil
+	}
+	promoteClassic(f)
+	return f, end, nil
 }
 
 func splitBodyAndSerial(content []byte) ([]byte, uint16) {
@@ -311,6 +318,9 @@ func (f *Frame) Hex() string {
 }
 
 func (f *Frame) String() string {
+	if f.Classic {
+		return fmt.Sprintf("proto=0x%02X serial=%04X body_len=%d classic raw=%s", f.Proto, f.Serial, len(f.Body), f.Hex())
+	}
 	return fmt.Sprintf("proto=0x%02X body_len=%d raw=%s", f.Proto, len(f.Body), f.Hex())
 }
 
