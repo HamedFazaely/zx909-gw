@@ -13,27 +13,25 @@ import (
 //
 // Classic GT06 / Concox (5-byte body after serial/CRC stripped):
 //
-//	terminal_info | voltage_level(0–6) | gsm(0–4) | alarm | language
+//	terminal_info | voltage_level(0-6) | gsm(0-4) | alarm | language
 type Status struct {
-	BatteryPercent int  // 0–100, or -1 if unknown
-	SoftwareVer    int  // raw version byte (Topin)
-	Timezone       int  // signed hours offset from UTC (Topin)
-	UploadInterval int  // minutes (Topin, best-effort)
-	VoltageLevel   int  // classic 0–6, or -1
-	GSMSignal      int  // classic 0–4, or -1
-	Charging       bool // classic terminal-info bit 2
-	GPSOn          bool // classic terminal-info bit 6
-	ACC            bool // classic terminal-info bit 1
-	OilCut         bool // classic terminal-info bit 7
-	Armed          bool // classic terminal-info bit 0
-	AlarmBits      int  // classic terminal-info bits 3–5
-	Language       int  // classic language byte
+	BatteryPercent int
+	SoftwareVer    int
+	Timezone       int
+	UploadInterval int
+	VoltageLevel   int
+	GSMSignal      int
+	Charging       bool
+	GPSOn          bool
+	ACC            bool
+	OilCut         bool
+	Armed          bool
+	AlarmBits      int
+	Language       int
 	Classic        bool
 	Raw            []byte
 }
 
-// voltageLevelPercent maps Concox voltage level 0–6 to a coarse percentage.
-// The protocol does not send a real SOC; this is only for ThingsBoard charts.
 func voltageLevelPercent(level int) int {
 	switch level {
 	case 0:
@@ -58,7 +56,7 @@ func voltageLevelPercent(level int) int {
 // ParseStatus decodes a Topin / ZX909 0x13 body (battery percent first).
 func ParseStatus(body []byte) (*Status, error) {
 	if len(body) < 1 {
-		return "", fmt.Errorf("status body empty")
+		return nil, fmt.Errorf("status body empty")
 	}
 
 	s := &Status{
@@ -68,11 +66,9 @@ func ParseStatus(body []byte) (*Status, error) {
 		Raw:            append([]byte(nil), body...),
 	}
 
-	// Battery: first byte is percentage on this firmware (0–100).
 	if b := int(body[0]); b <= 100 {
 		s.BatteryPercent = b
 	}
-
 	if len(body) >= 2 {
 		s.SoftwareVer = int(body[1])
 	}
@@ -86,6 +82,84 @@ func ParseStatus(body []byte) (*Status, error) {
 	if len(body) >= 4 {
 		s.UploadInterval = int(body[3])
 	}
-
 	return s, nil
+}
+
+// ParseClassicStatus decodes a Concox / GT06 0x13 information content.
+//
+//	[0] terminal information bits
+//	[1] voltage level 0-6
+//	[2] GSM signal 0-4
+//	[3] alarm
+//	[4] language (0x01 Chinese, 0x02 English)
+func ParseClassicStatus(body []byte) (*Status, error) {
+	if len(body) < 3 {
+		return nil, fmt.Errorf("classic status body too short: %d", len(body))
+	}
+
+	info := body[0]
+	level := int(body[1])
+	gsm := int(body[2])
+
+	s := &Status{
+		Classic:        true,
+		BatteryPercent: voltageLevelPercent(level),
+		VoltageLevel:   level,
+		GSMSignal:      gsm,
+		OilCut:         info&0x80 != 0,
+		GPSOn:          info&0x40 != 0,
+		AlarmBits:      int((info >> 3) & 0x07),
+		Charging:       info&0x04 != 0,
+		ACC:            info&0x02 != 0,
+		Armed:          info&0x01 != 0,
+		Raw:            append([]byte(nil), body...),
+	}
+	if len(body) >= 5 {
+		s.Language = int(body[4])
+	}
+	return s, nil
+}
+
+// DecodeStatus picks Topin vs classic GT06 heartbeat decoding.
+func DecodeStatus(classic bool, body []byte) (*Status, error) {
+	if classic {
+		return ParseClassicStatus(body)
+	}
+	return ParseStatus(body)
+}
+
+// Telemetry is the ThingsBoard attribute set for this heartbeat.
+func (s *Status) Telemetry() map[string]any {
+	values := map[string]any{}
+	if s.BatteryPercent >= 0 {
+		values["battery"] = s.BatteryPercent
+	}
+	if s.Classic {
+		values["voltage_level"] = s.VoltageLevel
+		values["gsm_signal"] = s.GSMSignal
+		values["charging"] = s.Charging
+		values["gps_on"] = s.GPSOn
+		values["acc"] = s.ACC
+	}
+	return values
+}
+
+func (s *Status) String() string {
+	if s.Classic {
+		parts := fmt.Sprintf("battery~%d%% volt_lvl=%d gsm=%d charge=%v gps=%v acc=%v armed=%v oil_cut=%v lang=%d",
+			s.BatteryPercent, s.VoltageLevel, s.GSMSignal, s.Charging, s.GPSOn, s.ACC, s.Armed, s.OilCut, s.Language)
+		if len(s.Raw) > 0 {
+			parts += " raw=" + hex.EncodeToString(s.Raw)
+		}
+		return parts
+	}
+	parts := fmt.Sprintf("battery=%d%% sw=0x%02X tz=%+d",
+		s.BatteryPercent, s.SoftwareVer, s.Timezone)
+	if s.UploadInterval > 0 {
+		parts += fmt.Sprintf(" interval=%d", s.UploadInterval)
+	}
+	if len(s.Raw) > 0 {
+		parts += " raw=" + hex.EncodeToString(s.Raw)
+	}
+	return parts
 }
