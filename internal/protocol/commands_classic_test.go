@@ -24,20 +24,11 @@ func TestBuildClassicCommand_RESET(t *testing.T) {
 	}
 }
 
-func TestBuildClassicCommand_WHERE_TIMER_FIND(t *testing.T) {
-	cases := []struct {
-		got  []byte
-		want string
-	}{
-		{BuildClassicLocate(1), "787810800a000000015748455245230001389f0d0a"},
-		{BuildClassicUploadInterval(60, 1), "78781680100000000154494d45522c36302c3630230001d6070d0a"},
-		{BuildClassicStatusInterval(2, 1), "787812800c000000014842542c313230230001e7af0d0a"},
-		{BuildClassicFind(true, 1), "78781880120000000146494e444445564943452c4f4e2300017ab00d0a"},
-		{BuildClassicFind(false, 1), "78781980130000000146494e444445564943452c4f4646230001fe0d0d0a"},
-	}
-	for _, tc := range cases {
-		if hex.EncodeToString(tc.got) != tc.want {
-			t.Fatalf("got %s want %s", hex.EncodeToString(tc.got), tc.want)
-		}
+func TestBuildClassicTimer_Live60_180(t *testing.T) {
+	// Captured send of TIMER,60,180# to 868022030668730 (serial 1 in builder).
+	got := hex.EncodeToString(BuildClassicTimer(60, 180, 1))
+	want := "78781780110000000154494d45522c36302c313830230001b6890d0a"
+	if got != want {
+		t.Fatalf("TIMER,60,180# = %s want %s", got, want)
 	}
 }

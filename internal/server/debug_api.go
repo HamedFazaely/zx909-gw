@@ -58,6 +58,7 @@ func (d *DebugAPI) shutdown(w http.ResponseWriter, r *http.Request) {
 
 type intervalReq struct {
 	LocationSeconds *uint16 `json:"location_seconds"`
+	IdleSeconds     *uint16 `json:"idle_seconds"`
 	StatusMinutes   *uint8  `json:"status_minutes"`
 }
 
@@ -68,20 +69,29 @@ func (d *DebugAPI) interval(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON: " + err.Error()})
 		return
 	}
-	if req.LocationSeconds == nil && req.StatusMinutes == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provide location_seconds and/or status_minutes"})
+	if req.LocationSeconds == nil && req.IdleSeconds == nil && req.StatusMinutes == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provide location_seconds, idle_seconds, and/or status_minutes"})
 		return
 	}
 
 	sent := map[string]any{}
 
-	if req.LocationSeconds != nil {
-		params, _ := json.Marshal(map[string]int{"seconds": int(*req.LocationSeconds)})
+	if req.LocationSeconds != nil || req.IdleSeconds != nil {
+		on := 60
+		if req.LocationSeconds != nil {
+			on = int(*req.LocationSeconds)
+		}
+		idle := on
+		if req.IdleSeconds != nil {
+			idle = int(*req.IdleSeconds)
+		}
+		params, _ := json.Marshal(map[string]int{"seconds": on, "idle_seconds": idle})
 		if err := d.handler.ExecuteRPC(r.Context(), imei, "setLocationInterval", params); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 			return
 		}
-		sent["location_seconds"] = *req.LocationSeconds
+		sent["location_seconds"] = on
+		sent["idle_seconds"] = idle
 	}
 	if req.StatusMinutes != nil {
 		params, _ := json.Marshal(map[string]int{"minutes": int(*req.StatusMinutes)})

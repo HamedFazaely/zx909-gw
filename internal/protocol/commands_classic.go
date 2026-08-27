@@ -51,16 +51,26 @@ func BuildClassicFind(on bool, serial uint16) []byte {
 	return BuildClassicCommand("FINDDEVICE,OFF#", serial)
 }
 
-// BuildClassicUploadInterval uses TIMER,T1,T2# (moving, static).
-// Single-arg TIMER,n# was ignored by IMEI 868022030668730.
+func clampTimerSec(sec int) int {
+	if sec < 5 {
+		return 5
+	}
+	if sec > 18000 {
+		return 18000
+	}
+	return sec
+}
+
+// BuildClassicTimer is TIMER,T1,T2# — ACC ON / ACC OFF seconds.
+// Confirmed on 868022030668730: TIMER,60,180# → "TIMER ACC ON:60s,ACC OFF:180s".
+func BuildClassicTimer(accOnSec, accOffSec int, serial uint16) []byte {
+	accOnSec = clampTimerSec(accOnSec)
+	accOffSec = clampTimerSec(accOffSec)
+	return BuildClassicCommand(fmt.Sprintf("TIMER,%d,%d#", accOnSec, accOffSec), serial)
+}
+
 func BuildClassicUploadInterval(seconds uint16, serial uint16) []byte {
-	if seconds < 10 {
-		seconds = 10
-	}
-	if seconds > 18000 {
-		seconds = 18000
-	}
-	return BuildClassicCommand(fmt.Sprintf("TIMER,%d,%d#", seconds, seconds), serial)
+	return BuildClassicTimer(int(seconds), int(seconds), serial)
 }
 
 func BuildClassicStatusInterval(minutes int, serial uint16) []byte {

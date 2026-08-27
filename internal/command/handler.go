@@ -81,16 +81,27 @@ func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, e
 		return protocol.BuildClassicCommand(text, serial), nil
 	case "setLocationInterval":
 		var p struct {
-			Seconds int `json:"seconds"`
+			Seconds     int `json:"seconds"`
+			IdleSeconds int `json:"idle_seconds"`
 		}
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params for setLocationInterval: %w", err)
 		}
-		if p.Seconds < 10 || p.Seconds > 7200 {
-			return nil, fmt.Errorf("seconds out of range (10-7200)")
+		if p.Seconds < 5 || p.Seconds > 18000 {
+			return nil, fmt.Errorf("seconds out of range (5-18000)")
+		}
+		idle := p.IdleSeconds
+		if idle == 0 {
+			idle = p.Seconds
+		}
+		if idle < 5 || idle > 18000 {
+			return nil, fmt.Errorf("idle_seconds out of range (5-18000)")
 		}
 		if classic {
-			return protocol.BuildClassicUploadInterval(uint16(p.Seconds), serial), nil
+			return protocol.BuildClassicTimer(p.Seconds, idle, serial), nil
+		}
+		if p.Seconds < 10 || p.Seconds > 7200 {
+			return nil, fmt.Errorf("seconds out of range (10-7200)")
 		}
 		return protocol.BuildUploadInterval(uint16(p.Seconds)), nil
 	case "setStatusInterval":
@@ -123,7 +134,7 @@ func (h *Handler) ExecuteRPC(ctx context.Context, imei, method string, params js
 
 func (h *Handler) ApplySharedAttributes(ctx context.Context, imei string, attrs map[string]any) error {
 	if v, ok := attrs["locationIntervalSeconds"]; ok {
-		if sec, ok := toInt(v); ok && sec >= 10 && sec <= 7200 {
+		if sec, ok := toInt(v); ok && sec >= 5 && sec <= 18000 {
 			params, _ := json.Marshal(map[string]int{"seconds": sec})
 			if err := h.ExecuteRPC(ctx, imei, "setLocationInterval", params); err != nil {
 				return err
