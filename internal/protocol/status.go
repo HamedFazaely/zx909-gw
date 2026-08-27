@@ -9,26 +9,62 @@ import (
 //
 // Short form observed on ZX909_EU (5-byte body):
 //
-//	battery% | sw_version | timezone | interval | ? 
+//	battery% | sw_version | timezone | interval | ?
 //
-// Long form (21-byte body) starts with the same prefix and appends
-// extra status / terminal-info bytes we log as raw for now.
+// Classic GT06 / Concox (5-byte body after serial/CRC stripped):
+//
+//	terminal_info | voltage_level(0–6) | gsm(0–4) | alarm | language
 type Status struct {
-	BatteryPercent int    // 0–100, or -1 if unknown
-	SoftwareVer    int    // raw version byte
-	Timezone       int    // signed hours offset from UTC (device-reported)
-	UploadInterval int    // minutes (best-effort)
-	Raw            []byte // full body for debugging
+	BatteryPercent int  // 0–100, or -1 if unknown
+	SoftwareVer    int  // raw version byte (Topin)
+	Timezone       int  // signed hours offset from UTC (Topin)
+	UploadInterval int  // minutes (Topin, best-effort)
+	VoltageLevel   int  // classic 0–6, or -1
+	GSMSignal      int  // classic 0–4, or -1
+	Charging       bool // classic terminal-info bit 2
+	GPSOn          bool // classic terminal-info bit 6
+	ACC            bool // classic terminal-info bit 1
+	OilCut         bool // classic terminal-info bit 7
+	Armed          bool // classic terminal-info bit 0
+	AlarmBits      int  // classic terminal-info bits 3–5
+	Language       int  // classic language byte
+	Classic        bool
+	Raw            []byte
 }
 
-// ParseStatus decodes a 0x13 status / heartbeat body.
+// voltageLevelPercent maps Concox voltage level 0–6 to a coarse percentage.
+// The protocol does not send a real SOC; this is only for ThingsBoard charts.
+func voltageLevelPercent(level int) int {
+	switch level {
+	case 0:
+		return 0
+	case 1:
+		return 10
+	case 2:
+		return 20
+	case 3:
+		return 40
+	case 4:
+		return 60
+	case 5:
+		return 80
+	case 6:
+		return 100
+	default:
+		return -1
+	}
+}
+
+// ParseStatus decodes a Topin / ZX909 0x13 body (battery percent first).
 func ParseStatus(body []byte) (*Status, error) {
 	if len(body) < 1 {
-		return nil, fmt.Errorf("status body empty")
+		return "", fmt.Errorf("status body empty")
 	}
 
 	s := &Status{
 		BatteryPercent: -1,
+		VoltageLevel:   -1,
+		GSMSignal:      -1,
 		Raw:            append([]byte(nil), body...),
 	}
 
@@ -41,7 +77,6 @@ func ParseStatus(body []byte) (*Status, error) {
 		s.SoftwareVer = int(body[1])
 	}
 	if len(body) >= 3 {
-		// Timezone often stored as signed integer hours (e.g. 3 = UTC+3, or 0x08 = +8 on some firmwares)
 		tz := int(body[2])
 		if tz > 127 {
 			tz -= 256
@@ -53,17 +88,4 @@ func ParseStatus(body []byte) (*Status, error) {
 	}
 
 	return s, nil
-}
-
-// String returns a human-readable summary for logs.
-func (s *Status) String() string {
-	parts := fmt.Sprintf("battery=%d%% sw=0x%02X tz=%+d",
-		s.BatteryPercent, s.SoftwareVer, s.Timezone)
-	if s.UploadInterval > 0 {
-		parts += fmt.Sprintf(" interval=%d", s.UploadInterval)
-	}
-	if len(s.Raw) > 0 {
-		parts += " raw=" + hex.EncodeToString(s.Raw)
-	}
-	return parts
 }
