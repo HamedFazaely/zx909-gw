@@ -12,12 +12,6 @@ const (
 	ClassicServerFlag uint32 = 0x00000001
 )
 
-// BuildClassicCommand wraps an ASCII SMS-style command in a GT06 0x80 frame.
-//
-//	78 78 | LEN | 80 | CMD_LEN | FLAG(4) | ASCII | SERIAL(2) | CRC | 0D 0A
-//
-// CMD_LEN = 4 + len(command). Language bytes from the PDF table are omitted;
-// the worked DYD example and live Concox devices do not include them.
 func BuildClassicCommand(command string, serial uint16) []byte {
 	cmd := []byte(command)
 	cmdLen := 4 + len(cmd)
@@ -42,9 +36,6 @@ func BuildClassicRestart(serial uint16) []byte {
 	return BuildClassicCommand("RESET#", serial)
 }
 
-// BuildClassicShutdown sends POWEROFF#, the 365GPS 4G verb.
-// IMEI 868022030668730 ignored it over 0x80 (no 0x15). Many classic
-// Concox vehicle units have no remote power-off at all — only RESET#.
 func BuildClassicShutdown(serial uint16) []byte {
 	return BuildClassicCommand("POWEROFF#", serial)
 }
@@ -53,6 +44,15 @@ func BuildClassicLocate(serial uint16) []byte {
 	return BuildClassicCommand("WHERE#", serial)
 }
 
+func BuildClassicFind(on bool, serial uint16) []byte {
+	if on {
+		return BuildClassicCommand("FINDDEVICE,ON#", serial)
+	}
+	return BuildClassicCommand("FINDDEVICE,OFF#", serial)
+}
+
+// BuildClassicUploadInterval uses TIMER,T1,T2# (moving, static).
+// Single-arg TIMER,n# was ignored by IMEI 868022030668730.
 func BuildClassicUploadInterval(seconds uint16, serial uint16) []byte {
 	if seconds < 10 {
 		seconds = 10
@@ -60,7 +60,7 @@ func BuildClassicUploadInterval(seconds uint16, serial uint16) []byte {
 	if seconds > 18000 {
 		seconds = 18000
 	}
-	return BuildClassicCommand(fmt.Sprintf("TIMER,%d#", seconds), serial)
+	return BuildClassicCommand(fmt.Sprintf("TIMER,%d,%d#", seconds, seconds), serial)
 }
 
 func BuildClassicStatusInterval(minutes int, serial uint16) []byte {

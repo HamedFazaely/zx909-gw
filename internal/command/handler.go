@@ -49,6 +49,16 @@ func (h *Handler) packet(imei, method string, params json.RawMessage) ([]byte, e
 			return protocol.BuildClassicLocate(serial), nil
 		}
 		return protocol.BuildLocate(), nil
+	case "findOn":
+		if !classic {
+			return nil, fmt.Errorf("findOn is classic GT06 only")
+		}
+		return protocol.BuildClassicFind(true, serial), nil
+	case "findOff":
+		if !classic {
+			return nil, fmt.Errorf("findOff is classic GT06 only")
+		}
+		return protocol.BuildClassicFind(false, serial), nil
 	case "send":
 		var p struct {
 			Text string `json:"text"`
@@ -138,7 +148,7 @@ func toInt(v any) (int, bool) {
 	case int:
 		return n, true
 	case int64:
-		return n, true
+		return int(n), true
 	case json.Number:
 		i, err := n.Int64()
 		return int(i), err == nil

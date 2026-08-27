@@ -24,15 +24,16 @@ func TestBuildClassicCommand_RESET(t *testing.T) {
 	}
 }
 
-func TestBuildClassicCommand_WHERE_TIMER_HBT(t *testing.T) {
+func TestBuildClassicCommand_WHERE_TIMER_FIND(t *testing.T) {
 	cases := []struct {
 		got  []byte
 		want string
 	}{
 		{BuildClassicLocate(1), "787810800a000000015748455245230001389f0d0a"},
-		{BuildClassicUploadInterval(60, 1), "787813800d0000000154494d45522c3630230001a9cd0d0a"},
+		{BuildClassicUploadInterval(60, 1), "78781680100000000154494d45522c36302c3630230001d6070d0a"},
 		{BuildClassicStatusInterval(2, 1), "787812800c000000014842542c313230230001e7af0d0a"},
-		{BuildClassicShutdown(1), "787813800d00000001504f5745524f46462300018b0e0d0a"},
+		{BuildClassicFind(true, 1), "78781880120000000146494e444445564943452c4f4e2300017ab00d0a"},
+		{BuildClassicFind(false, 1), "78781980130000000146494e444445564943452c4f4646230001fe0d0d0a"},
 	}
 	for _, tc := range cases {
 		if hex.EncodeToString(tc.got) != tc.want {

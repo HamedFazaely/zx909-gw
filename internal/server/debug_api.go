@@ -26,6 +26,7 @@ func (d *DebugAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /devices/{imei}/shutdown", d.shutdown)
 	mux.HandleFunc("POST /devices/{imei}/interval", d.interval)
 	mux.HandleFunc("POST /devices/{imei}/locate", d.locate)
+	mux.HandleFunc("POST /devices/{imei}/find", d.find)
 	mux.HandleFunc("POST /devices/{imei}/command", d.command)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ts": time.Now().UTC()})
@@ -103,6 +104,30 @@ func (d *DebugAPI) locate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imei": imei, "cmd": "locate"})
 }
 
+func (d *DebugAPI) find(w http.ResponseWriter, r *http.Request) {
+	imei := r.PathValue("imei")
+	var req struct {
+		On *bool `json:"on"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if req.On == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provide on: true|false"})
+		return
+	}
+	method := "findOff"
+	if *req.On {
+		method = "findOn"
+	}
+	if err := d.handler.ExecuteRPC(r.Context(), imei, method, nil); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imei": imei, "cmd": method, "on": *req.On})
+}
+
 func (d *DebugAPI) command(w http.ResponseWriter, r *http.Request) {
 	imei := r.PathValue("imei")
 	var req struct {
@@ -135,6 +160,7 @@ func ListenAndServeDebug(addr string, srv *Server, handler *command.Handler) err
 			"POST /devices/{imei}/shutdown",
 			"POST /devices/{imei}/interval",
 			"POST /devices/{imei}/locate",
+			"POST /devices/{imei}/find",
 			"POST /devices/{imei}/command",
 		}, ", "))
 	return http.ListenAndServe(addr, api.Handler())
