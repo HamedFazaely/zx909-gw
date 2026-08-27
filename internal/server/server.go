@@ -77,6 +77,7 @@ type Session struct {
 	Connected   time.Time
 	LastSeen    time.Time
 	tbConnected bool // true after successful TB ConnectDevice for this session
+	Classic     bool // classic GT06 / Concox ACKs (length + serial + CRC)
 	mu          sync.RWMutex
 }
 
@@ -87,6 +88,7 @@ type SessionInfo struct {
 	Connected   time.Time `json:"connected"`
 	LastSeen    time.Time `json:"last_seen"`
 	TBConnected bool      `json:"tb_connected"`
+	Classic     bool      `json:"classic"`
 }
 
 func New(cfg config.ServerConfig, tb mqtt.Client, geo geolocation.Client, reg registry.Registry) *Server {
@@ -206,6 +208,8 @@ func (s *Server) drainFrames(sc *SafeConn, remote string, buf []byte, imei *stri
 			"remote", remote,
 			"imei", *imei,
 			"proto", protocol.ProtoHex(frame.Proto),
+			"classic", frame.Classic,
+			"serial", frame.Serial,
 			"body_len", len(frame.Body),
 			"raw", frame.Hex(),
 		)
@@ -288,24 +292,54 @@ func (s *Server) publishTelemetry(imei string, ts time.Time, values map[string]a
 	_ = s.tb.PublishTelemetry(imei, ts, values)
 }
 
+func sessionClassic(sess *Session) bool {
+	if sess == nil {
+		return false
+	}
+	sess.mu.RLock()
+	defer sess.mu.RUnlock()
+	return sess.Classic
+}
+
+func markClassic(sess *Session) {
+	if sess == nil {
+		return
+	}
+	sess.mu.Lock()
+	sess.Classic = true
+	sess.mu.Unlock()
+}
+
 func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame, imei *string, sess **Session) {
+	if frame.Classic && *sess != nil {
+		markClassic(*sess)
+	}
+
 	switch frame.Proto {
 	case protocol.MsgLogin:
 		id, err := protocol.ParseLogin(frame.Body)
 		if err != nil {
 			slog.Warn("login parse failed", "error", err, "remote", remote, "body", hex.EncodeToString(frame.Body))
-			s.writeFrame(sc, remote, "", protocol.MsgLogin, protocol.BuildLoginACK(), "ACK")
+			s.replyLogin(sc, remote, "", frame)
 			return
 		}
 		*imei = id
 		*sess = s.registerSession(id, sc, remote)
-		slog.Info("login ok", "imei", id, "remote", remote)
-		s.writeFrame(sc, remote, id, protocol.MsgLogin, protocol.BuildLoginACK(), "ACK")
+		if frame.Classic {
+			markClassic(*sess)
+		}
+		slog.Info("login ok", "imei", id, "remote", remote, "classic", frame.Classic, "serial", frame.Serial)
+		s.replyLogin(sc, remote, id, frame)
 		go s.maybeConnectTB(*sess, id)
 
 	case protocol.MsgTimeSync:
 		if *sess != nil {
 			(*sess).touch()
+		}
+		if sessionClassic(*sess) || frame.Classic {
+			// Classic GT06 has no 0x30 handshake; ignore rather than send a 365GPS blob.
+			slog.Debug("skip Topin time-sync reply on classic session", "imei", *imei)
+			return
 		}
 		reply := protocol.BuildTimeSyncReply(time.Now())
 		s.writeFrame(sc, remote, *imei, protocol.MsgTimeSync, reply, "ACK")
@@ -313,6 +347,10 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 	case protocol.MsgParam:
 		if *sess != nil {
 			(*sess).touch()
+		}
+		if sessionClassic(*sess) || frame.Classic {
+			slog.Debug("skip Topin default-settings reply on classic session", "imei", *imei)
+			return
 		}
 		reply := protocol.BuildDefaultSettings()
 		s.writeFrame(sc, remote, *imei, protocol.MsgParam, reply, "ACK")
@@ -345,9 +383,9 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 				})
 			}
 		}
-		s.writeFrame(sc, remote, *imei, protocol.MsgStatus, protocol.BuildStatusEcho(frame.Raw), "ACK")
+		s.replyStatus(sc, remote, *imei, frame)
 
-	case protocol.MsgGPS, protocol.MsgGPSLBS, protocol.MsgGPS2, protocol.MsgGPSOffline:
+	case protocol.MsgGPS, protocol.MsgGPSLBS, protocol.MsgGPS2, protocol.MsgGPSOffline, protocol.MsgAlarm:
 		if *imei == "" {
 			slog.Debug("GPS before login, ignoring", "remote", remote)
 			return
@@ -374,8 +412,7 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 				"lat", pos.Latitude, "lon", pos.Longitude, "speed", pos.SpeedKmh,
 				"course", pos.Course, "sats", pos.Satellites, "valid", pos.Valid)
 		}
-		dt := protocol.DatetimeFromBody(frame.Body)
-		s.writeFrame(sc, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
+		s.replyLocation(sc, remote, *imei, frame)
 
 	case protocol.MsgWifiLBS, protocol.MsgWifiLBS2, protocol.MsgOfflineWifi, protocol.MsgOnlineWifi:
 		if *sess != nil {
@@ -392,8 +429,7 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 				go s.resolveAndPublishLBS(*imei, wl)
 			}
 		}
-		dt := protocol.DatetimeFromBody(frame.Body)
-		s.writeFrame(sc, remote, *imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
+		s.replyLocation(sc, remote, *imei, frame)
 
 	default:
 		if *sess != nil {
@@ -403,11 +439,43 @@ func (s *Server) handleFrame(sc *SafeConn, remote string, frame *protocol.Frame,
 			"proto", protocol.ProtoHex(frame.Proto),
 			"imei", *imei,
 			"remote", remote,
+			"classic", frame.Classic,
+			"serial", frame.Serial,
 			"body_len", len(frame.Body),
 			"body", hex.EncodeToString(frame.Body),
 			"raw", frame.Hex(),
 		)
 	}
+}
+
+func (s *Server) replyLogin(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
+	var payload []byte
+	if frame.Classic {
+		payload = protocol.BuildACK(protocol.MsgLogin, frame.Serial)
+	} else {
+		payload = protocol.BuildLoginACK()
+	}
+	s.writeFrame(sc, remote, imei, protocol.MsgLogin, payload, "ACK")
+}
+
+func (s *Server) replyStatus(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
+	var payload []byte
+	if frame.Classic {
+		payload = protocol.BuildACK(protocol.MsgStatus, frame.Serial)
+	} else {
+		payload = protocol.BuildStatusEcho(frame.Raw)
+	}
+	s.writeFrame(sc, remote, imei, protocol.MsgStatus, payload, "ACK")
+}
+
+func (s *Server) replyLocation(sc *SafeConn, remote, imei string, frame *protocol.Frame) {
+	if frame.Classic {
+		// PDF: location (0x12) / alarm (0x16) do not require a server reply.
+		// Sending the 365GPS datetime echo would look like garbage to Concox firmware.
+		return
+	}
+	dt := protocol.DatetimeFromBody(frame.Body)
+	s.writeFrame(sc, remote, imei, frame.Proto, protocol.BuildDatetimeACK(frame.Proto, dt), "ACK")
 }
 
 func (s *Server) maybeConnectTB(sess *Session, imei string) {
@@ -511,6 +579,7 @@ func (s *Server) ListSessions() []SessionInfo {
 			Connected:   sess.Connected,
 			LastSeen:    sess.LastSeen,
 			TBConnected: sess.tbConnected,
+			Classic:     sess.Classic,
 		})
 		sess.mu.RUnlock()
 	}
