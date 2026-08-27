@@ -43,3 +43,41 @@ curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
     "params": { "minutes": 2 },
     "timeout": 10000
   }'
+
+
+  =========================================================
+  # reboot
+curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"method":"reboot","params":{}}'
+
+# locate
+curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"method":"locate","params":{}}'
+
+# find
+curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"method":"findOn","params":{}}'
+
+# GPS interval
+curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"method":"setLocationInterval","params":{"seconds":60,"idle_seconds":180}}'
+
+# heartbeat interval
+curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"method":"setStatusInterval","params":{"seconds":180,"idle_seconds":180}}'
+
+# raw verb
+curl -s -X POST "$TB/api/rpc/twoway/$DEVICE_ID" \
+  -H "X-Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"method":"send","params":{"text":"TIMER#"}}'
